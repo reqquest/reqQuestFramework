@@ -38,6 +38,12 @@ python3 .reqq/validator/reqq_validate_stdlib.py upgrade --version X.Y.Z
 
 Full documentation of the toolkit's structure, commands, and versioning model: [`.reqq/README.md`](.reqq/README.md).
 
+## Toolkit lock
+
+`adopt` writes `.reqq/toolkit.lock` into the adopting repository: a small JSON manifest recording the toolkit version currently in place, the channel (`stable`/`next`), and a checksum per boundary file. It is the record a repository uses to track drift and to check for or apply upgrades (`check`, `upgrade`) — see [`.reqq/README.md`](.reqq/README.md#toolkit-versioning-adr-toolkit-001) for the full command reference.
+
+A repository with no `.reqq/toolkit.lock` simply has not adopted a toolkit version yet — that is not an error condition, just a starting point. Run `adopt` (see Quick start above) to create one.
+
 ## Documentation
 
 - [`requirements/README.md`](requirements/README.md) — the requirements starter kit, with worked examples
