@@ -1,0 +1,27 @@
+# config.example.yaml — starting point for `.reqq/validator/config.yaml`.
+#
+# `config.yaml` is local configuration and is deliberately NOT part of the toolkit
+# boundary (ADR-TOOLKIT-001 D1), so `upgrade` never touches it. This example ships
+# instead, so a fresh adopter has something to copy:
+#
+#     cp .reqq/validator/config.example.yaml .reqq/validator/config.yaml
+#
+# Everything here is optional — the validator runs without config.yaml. Path exclusions
+# live in `.reqqignore` at the repo root (portable across validator implementations);
+# `exclude_globs` below is the validator-specific addition, and the two are summed.
+
+# FR/NFR without `traces_to` fail validation. Set to false to check only the
+# per-type required fields (category / decisions / derives_from).
+require_full_traceability: true
+
+# Validator-specific exclusions, on top of .reqqignore.
+exclude_globs: []
+
+# Toolkit versioning (ADR-TOOLKIT-001 D5). Remove this block to disable the CI check
+# entirely — `check --ci` then exits 0 without doing anything.
+# The stdlib YAML parser does not strip inline comments — keep them on their own line.
+toolkit:
+  # stable | next
+  update_channel: stable
+  # manual | ci-notify | ci-pr
+  update_check: ci-notify

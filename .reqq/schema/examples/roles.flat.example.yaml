@@ -1,0 +1,22 @@
+# roles.yaml — FLAT variant (small teams / single maintainer group).
+#
+# One role, the whole team on `handle` as a list, responsible_for: ["*"].
+# This is the real shape of a small team that co-owns every requirement
+# (a plain `/requirements/** @alice @bob` in CODEOWNERS) — a first-class
+# case, not a degraded role model.
+#
+# Placeholder handles — replace with your own before use.
+# Validates against .reqq/schema/roles.schema.json (draft-07).
+# Map form only — see ADR-GOV-001.
+
+version: "0.1"
+
+roles:
+  role-maintainer:
+    title: "Maintainer"
+    handle:
+      - "@alice"
+      - "@bob"
+    responsible_for:
+      - "*"
+    min_permission: write

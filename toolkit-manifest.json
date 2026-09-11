@@ -1,0 +1,24 @@
+{
+  "manifest_version": 1,
+  "toolkit": "reqquest-framework",
+  "description": "Canonical path boundary of the reqQuest Framework toolkit (ADR-TOOLKIT-001 D1). The GitHub Release asset `raac-toolkit-<version>.tar.gz` attached to every `toolkit-v<version>` tag contains exactly the files matched by `boundary` and not by `exclude`, packed under a single top-level `raac-toolkit-<version>/` directory. `.reqq/validator/reqq_validate_stdlib.py` reads this same file to compute the hashes it records in `.reqq/toolkit.lock`. The boundary must stay self-sufficient: whatever the shipped validator and the shipped CI workflow need in order to run green on a fresh extract has to be inside it.",
+  "source": "https://github.com/reqquest/reqQuestFramework",
+  "tag_prefix": "toolkit-v",
+  "asset_template": "raac-toolkit-{version}.tar.gz",
+  "boundary": [
+    "toolkit-manifest.json",
+    ".reqqignore",
+    ".reqq/schema/**/*",
+    ".reqq/validator/*.py",
+    ".reqq/validator/config.example.yaml",
+    ".reqq/hooks/**/*",
+    ".github/workflows/requirements-*.yml",
+    "requirements/README.md",
+    "requirements/**/README.md",
+    "requirements/00-context/**/*"
+  ],
+  "exclude": [
+    ".reqq/toolkit.lock",
+    ".reqq/validator/config.yaml"
+  ]
+}

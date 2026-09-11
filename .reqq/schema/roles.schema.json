@@ -1,0 +1,76 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://reqquest.dev/schema/roles.schema.json",
+  "title": "reqQuest Framework Ownership — Role Catalog (roles.yaml)",
+  "description": "Machine-readable projection of the human-facing stakeholder catalogue. Source of truth for the ownership validator (V1/V4/V5) and the CODEOWNERS generator. Contract defined in ADR-GOV-001.",
+  "type": "object",
+  "required": ["roles"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "description": "Optional schema-consumer version of this catalogue (major.minor)."
+    },
+    "roles": {
+      "type": "object",
+      "description": "Map form is mandatory: the key IS the role id, which structurally guarantees uniqueness. List form is rejected — the stdlib parser (_parse_simple_yaml) silently drops the nested fields of a list-of-mappings without raising. See ADR-GOV-001, section 'Empirical evidence'.",
+      "minProperties": 1,
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9-]*$",
+        "description": "Role id: lowercase kebab-case, e.g. role-maintainer, role-tech-lead."
+      },
+      "additionalProperties": { "$ref": "#/definitions/role" }
+    }
+  },
+  "definitions": {
+    "handle": {
+      "type": "string",
+      "pattern": "^@[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?(?:/[A-Za-z0-9._-]+)?$",
+      "description": "Host handle: @user or @org/team. Username part allows '.' and '_' (valid on GitLab, e.g. @alice.smith); GitHub uses a subset. Verified against the host only at level `enforce` (rule V6)."
+    },
+    "role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "handle", "responsible_for", "min_permission"],
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 2,
+          "description": "Human-readable role name, mirrored from the stakeholder prose (K2)."
+        },
+        "handle": {
+          "description": "One handle, or a list of handles (flat variant — the whole team owns everything).",
+          "oneOf": [
+            { "$ref": "#/definitions/handle" },
+            {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "$ref": "#/definitions/handle" }
+            }
+          ]
+        },
+        "responsible_for": {
+          "type": "array",
+          "description": "Directories under requirements/ this role owns, relative to the repo root. `*` means the whole requirements/ tree (flat variant). Two roles claiming the same directory is a hard error on GitHub (last-match-wins) — rule V5.",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "min_permission": {
+          "type": "string",
+          "description": "Lowest host permission a handle must hold for this role. Consulted only at level `enforce` (rule V6); declared at every level so intent is recorded before it is enforced.",
+          "enum": ["read", "triage", "write", "maintain", "admin"]
+        },
+        "min_approvals": {
+          "$comment": "Optional, GitLab-only (section [Name][N]). Honoured on GitLab, ignored with a warning on GitHub where the approval count is repo-global, not per-path (ADR-GOV-001 D8). Accepts a string form because the stdlib parser _parse_simple_yaml returns every scalar as a string — the Phase 1 validator coerces it. Added to the schema now so extending roles.yaml later does not break existing adopters.",
+          "anyOf": [
+            { "type": "integer", "minimum": 1 },
+            { "type": "string", "pattern": "^[1-9][0-9]*$" }
+          ]
+        }
+      }
+    }
+  }
+}

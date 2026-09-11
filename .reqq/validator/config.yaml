@@ -1,0 +1,15 @@
+require_full_traceability: true
+exclude_globs:
+  - "requirements/README.md"
+  - "requirements/**/README.md"
+  - "requirements/00-context/**"
+  - ".reqq/toolkit.lock"
+
+# Toolkit versioning (ADR-TOOLKIT-001 D5). Remove this block to disable the CI check
+# entirely — `check --ci` then exits 0 without doing anything.
+# The stdlib YAML parser does not strip inline comments — keep them on their own line.
+toolkit:
+  # stable | next
+  update_channel: stable
+  # manual | ci-notify | ci-pr
+  update_check: ci-notify

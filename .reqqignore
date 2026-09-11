@@ -1,0 +1,10 @@
+# .reqqignore — reqQuest Framework validator exclusions (glob per line, "#" for comments).
+# Portable across validator implementations — see docs/conventions.md, section 6.
+requirements/00-context/**
+requirements/metrics/**
+requirements/README.md
+requirements/**/README.md
+# Toolkit version manifest (ADR-TOOLKIT-001 D3) — not a requirement artefact.
+# This validator never reaches it (it scans requirements/**/*.md), but the contract targets
+# several validator copies, so the exclusion is declared rather than assumed.
+.reqq/toolkit.lock

@@ -1,0 +1,96 @@
+{
+  "preset": "simple",
+  "initialVersion": "1.1.0",
+  "releasePrefix": "toolkit-v",
+  "releaseLenient": true,
+  "scheme": "SEMVER",
+  "stateFile": ".nyx-state.json",
+  "verbosity": "INFO",
+  "releaseTypes": {
+    "publicationServices": ["github"],
+    "enabled": ["develop", "mainline", "task", "feature", "internal"],
+    "items": {
+      "develop": {
+        "description": "Develop integration branch — tag only, no commit (branch protection requires PR)",
+        "filterTags": "^({{configuration.releasePrefix}})?([0-9]\\d*)\\.([0-9]\\d*)\\.([0-9]\\d*)$",
+        "gitCommit": "false",
+        "gitPush": "false",
+        "gitTag": "true",
+        "matchBranches": "^develop$",
+        "matchEnvironmentVariables": {
+          "CI": "^true$"
+        },
+        "publish": "true"
+      },
+      "mainline": {
+        "description": "Main release branch — tag only, no commit (branch protection requires PR, same as develop)",
+        "filterTags": "^({{configuration.releasePrefix}})?([0-9]\\d*)\\.([0-9]\\d*)\\.([0-9]\\d*)$",
+        "gitCommit": "false",
+        "gitPush": "false",
+        "gitTag": "true",
+        "matchBranches": "^(main|master)$",
+        "matchEnvironmentVariables": {
+          "CI": "^true$"
+        },
+        "publish": "true"
+      },
+      "task": {
+        "description": "Task branches (REQQF#N — GitHub issue number)",
+        "collapseVersions": true,
+        "collapsedVersionQualifier": "{{#sanitizeLower}}{{branch}}{{/sanitizeLower}}",
+        "filterTags": "^({{configuration.releasePrefix}})?([0-9]\\d*)\\.([0-9]\\d*)\\.([0-9]\\d*)(-)([0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)$",
+        "gitCommit": "false",
+        "gitPush": "false",
+        "gitTag": "false",
+        "matchBranches": "^(REQQF)#[0-9]+.*$",
+        "publish": "false"
+      },
+      "feature": {
+        "description": "Feature / fix branches",
+        "collapseVersions": true,
+        "collapsedVersionQualifier": "{{#sanitizeLower}}{{branch}}{{/sanitizeLower}}",
+        "filterTags": "^({{configuration.releasePrefix}})?([0-9]\\d*)\\.([0-9]\\d*)\\.([0-9]\\d*)(-)([0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)$",
+        "gitCommit": "false",
+        "gitPush": "false",
+        "gitTag": "false",
+        "matchBranches": "^(feat|feature|fix|bugfix|hotfix)/.*$",
+        "publish": "false"
+      }
+    }
+  },
+  "commitMessageConventions": {
+    "enabled": ["conventionalCommits"],
+    "items": {
+      "conventionalCommits": {
+        "expression": "(?s)^(?<type>[a-zA-Z0-9_]+)(\\((?<scope>[a-zA-Z0-9 \\ -]+)\\))?(!)?: (?<title>.+)$.*",
+        "bumpExpressions": {
+          "major": "(?s)(?m)^[a-zA-Z0-9_]+(!|\\([a-zA-Z0-9 \\ -]+\\)!):(.*)",
+          "minor": "(?s)(?m)^feat(?:\\([a-zA-Z0-9 \\ -]+\\))?:(.*)",
+          "patch": "(?s)(?m)^(fix|sec|perf)(?:\\([a-zA-Z0-9 \\ -]+\\))?:(.*)"
+        }
+      }
+    }
+  },
+  "changelog": {
+    "path": "CHANGELOG.md",
+    "template": ".nyx/CHANGELOG.tpl",
+    "sections": {
+      "Added": "^feat$",
+      "Fixed": "^fix$",
+      "Security": "^sec$",
+      "Performance": "^perf$",
+      "Changed": "^refactor$",
+      "Removed": "^remove$"
+    }
+  },
+  "services": {
+    "github": {
+      "type": "GITHUB",
+      "options": {
+        "AUTHENTICATION_TOKEN": "{{#environmentVariable}}GITHUB_TOKEN{{/environmentVariable}}",
+        "REPOSITORY_NAME": "reqQuestFramework",
+        "REPOSITORY_OWNER": "reqquest"
+      }
+    }
+  }
+}

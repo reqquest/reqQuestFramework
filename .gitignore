@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+node_modules/
+
+# Release tooling (ADR-TOOLKIT-001)
+.nyx-state.json
+/dist/

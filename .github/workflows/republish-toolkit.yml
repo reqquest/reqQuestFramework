@@ -1,0 +1,58 @@
+name: Republish toolkit asset
+
+# Rebuilds and re-attaches `raac-toolkit-<version>.tar.gz` for an existing
+# `toolkit-v<version>` tag, keeping the download URL stable (ADR-TOOLKIT-001 D4).
+# Use when an asset was lost, or a packaging fix must reach a published release
+# without a new version. The tarball is deterministic, so a rebuild from the same
+# tag reproduces the same bytes unless the packer itself changed — in which case
+# the SHA256SUMS block in the release body is refreshed too.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Bare SemVer of the release to republish, e.g. 1.0.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  republish:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      VERSION: ${{ inputs.version }}
+      TAG: toolkit-v${{ inputs.version }}
+      SOURCE_DATE_EPOCH: "315532800"
+    steps:
+      - name: Checkout the tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+
+      - name: Verify the release exists
+        run: gh release view "$TAG" --json tagName -q .tagName
+
+      - name: Rebuild toolkit asset
+        run: python3 scripts/pack-toolkit.py --version "$VERSION" --out dist
+
+      - name: Re-upload asset and refresh SHA256SUMS
+        run: |
+          gh release upload "$TAG" "dist/raac-toolkit-${VERSION}.tar.gz" --clobber
+          BODY=$(gh release view "$TAG" --json body -q .body)
+          # Drop any existing SHA256SUMS block, then append the freshly computed one.
+          STRIPPED=$(printf '%s\n' "$BODY" | sed '/^## SHA256SUMS[[:space:]]*$/,$d')
+          {
+            printf '%s\n\n' "$STRIPPED"
+            printf '## SHA256SUMS\n\n```\n'
+            cat dist/SHA256SUMS
+            printf '```\n'
+          } > release-notes.md
+          gh release edit "$TAG" --notes-file release-notes.md
+
+      - name: Summary
+        run: |
+          echo "### Republished $TAG" >> "$GITHUB_STEP_SUMMARY"
+          cat dist/SHA256SUMS >> "$GITHUB_STEP_SUMMARY"

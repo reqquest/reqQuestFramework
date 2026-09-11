@@ -1,0 +1,183 @@
+name: Release toolkit
+
+# Semantic-release for the toolkit contract (ADR-TOOLKIT-001 D2). Cuts
+# `toolkit-vX.Y.Z` tags, regenerates CHANGELOG.md, publishes a GitHub
+# Release, and attaches `raac-toolkit-X.Y.Z.tar.gz` + a `SHA256SUMS` block
+# in the release body (the block the validator's `upgrade` verifies the
+# asset against).
+
+on:
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Nyx semantic release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history for Nyx
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Run Nyx Infer
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/project" -w /project \
+            -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" -e CI=true \
+            mooltiverse/nyx:latest infer
+
+      - name: Decide whether a release is needed
+        id: check_release
+        run: |
+          NEW_RELEASE=false
+          NEW_VERSION=false
+          VERSION=""
+          PUBLISH=""
+          if [ -f .nyx-state.json ]; then
+            NEW_RELEASE=$(jq -r '.newRelease // false' .nyx-state.json)
+            NEW_VERSION=$(jq -r '.newVersion // false' .nyx-state.json)
+            PUBLISH=$(jq -r '.releaseType.publish // "?"' .nyx-state.json)
+            RAW=$(jq -r '.version // ""' .nyx-state.json)
+            VERSION="${RAW#toolkit-v}"; VERSION="${VERSION#v}"
+          else
+            echo "::warning::.nyx-state.json not found — assuming no new release"
+          fi
+          # A release type whose `publish` is false makes this job a silent green no-op:
+          # Nyx has a version to cut but is not allowed to. That is how a toolkit release
+          # once sat unreleased for a day — the `develop` release type was defined in
+          # .nyx.json but missing from `releaseTypes.enabled`, so pushes fell through to
+          # the `simple` preset's catch-all `internal` type. Say it out loud instead.
+          if [ "$NEW_VERSION" = "true" ] && [ "$NEW_RELEASE" != "true" ]; then
+            echo "::warning::Nyx inferred version ${VERSION} but the matched release type has publish=${PUBLISH} — no release will be cut on ${{ github.ref_name }}; check releaseTypes.enabled in .nyx.json"
+          fi
+          if [ "$NEW_RELEASE" = "true" ] && git tag --list "toolkit-v${VERSION}" | grep -q .; then
+            echo "::warning::tag toolkit-v${VERSION} already exists — skipping release"
+            NEW_RELEASE=false
+          fi
+          echo "new_release=$NEW_RELEASE" >> "$GITHUB_OUTPUT"
+          echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "ℹ️ new_release=$NEW_RELEASE new_version=$NEW_VERSION publish=$PUBLISH version=$VERSION"
+
+      - name: Run Nyx Make
+        if: steps.check_release.outputs.new_release == 'true'
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/project" -w /project \
+            -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" -e CI=true \
+            mooltiverse/nyx:latest make
+
+      # Nyx runs as root in the container, so everything it wrote back into the workspace
+      # is root-owned. Hand it to the runner user before git touches it.
+      - name: Fix workspace permissions after Make
+        if: steps.check_release.outputs.new_release == 'true'
+        run: sudo chown -R "$(whoami):$(id -gn)" .git CHANGELOG.md
+
+      # `make` regenerates CHANGELOG.md in the working tree, but every release type sets
+      # `gitCommit: "false"` (branch protection requires a PR), so Nyx never commits it and
+      # the push step below compares commits, not the working tree — the regenerated file
+      # would be thrown away with the runner. Commit it here, before `mark` tags HEAD, so
+      # the tag carries the changelog it describes.
+      - name: Commit the regenerated CHANGELOG.md
+        if: steps.check_release.outputs.new_release == 'true'
+        run: |
+          if git diff --quiet -- CHANGELOG.md; then
+            echo "ℹ️ CHANGELOG.md unchanged — nothing to commit"
+          else
+            git add CHANGELOG.md
+            git commit -m "chore(release): toolkit-v${{ steps.check_release.outputs.version }} changelog [skip ci]"
+            echo "✓ committed the regenerated CHANGELOG.md"
+          fi
+
+      - name: Run Nyx Mark
+        if: steps.check_release.outputs.new_release == 'true'
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/project" -w /project \
+            -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" -e CI=true \
+            -e GIT_AUTHOR_NAME="github-actions[bot]" \
+            -e GIT_AUTHOR_EMAIL="github-actions[bot]@users.noreply.github.com" \
+            -e GIT_COMMITTER_NAME="github-actions[bot]" \
+            -e GIT_COMMITTER_EMAIL="github-actions[bot]@users.noreply.github.com" \
+            mooltiverse/nyx:latest mark
+
+      - name: Fix git permissions
+        if: steps.check_release.outputs.new_release == 'true'
+        run: sudo chown -R "$(whoami):$(id -gn)" .git
+
+      - name: Push commits and tags
+        if: steps.check_release.outputs.new_release == 'true'
+        run: |
+          git fetch origin "${{ github.ref_name }}"
+          if git diff --quiet "origin/${{ github.ref_name }}" HEAD; then
+            echo "ℹ️ no new commit to push"
+          elif git push origin "HEAD:${{ github.ref_name }}"; then
+            echo "✓ pushed the changelog commit to ${{ github.ref_name }}"
+          else
+            # A protected branch that refuses the bot must not fail the release — the tag
+            # (pushed below) still carries the changelog. Say so loudly instead of silently
+            # letting CHANGELOG.md rot on the branch.
+            echo "::warning::could not push to ${{ github.ref_name }} — the regenerated CHANGELOG.md is on tag toolkit-v${{ steps.check_release.outputs.version }} but not on the branch; sync it via PR"
+          fi
+          if git tag --points-at HEAD | grep -q .; then
+            git push --tags
+          fi
+
+      - name: Run Nyx Publish
+        if: steps.check_release.outputs.new_release == 'true'
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/project" -w /project \
+            -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" -e CI=true \
+            mooltiverse/nyx:latest publish
+
+      - name: Build toolkit asset
+        if: steps.check_release.outputs.new_release == 'true'
+        env:
+          SOURCE_DATE_EPOCH: "315532800"
+        run: python3 scripts/pack-toolkit.py --version "${{ steps.check_release.outputs.version }}" --out dist
+
+      - name: Attach asset and SHA256SUMS to the Release
+        if: steps.check_release.outputs.new_release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: toolkit-v${{ steps.check_release.outputs.version }}
+        run: |
+          gh release upload "$TAG" dist/raac-toolkit-${{ steps.check_release.outputs.version }}.tar.gz --clobber
+          BODY=$(gh release view "$TAG" --json body -q .body)
+          if printf '%s' "$BODY" | grep -q '^## SHA256SUMS'; then
+            echo "ℹ️ release body already carries a SHA256SUMS block — leaving it"
+          else
+            {
+              printf '%s\n\n' "$BODY"
+              printf '## SHA256SUMS\n\n```\n'
+              cat dist/SHA256SUMS
+              printf '```\n'
+            } > release-notes.md
+            gh release edit "$TAG" --notes-file release-notes.md
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Toolkit release" >> "$GITHUB_STEP_SUMMARY"
+          echo "- new_release: \`${{ steps.check_release.outputs.new_release }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- new_version: \`${{ steps.check_release.outputs.new_version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- releaseType.publish: \`${{ steps.check_release.outputs.publish }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- version: \`${{ steps.check_release.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
