@@ -25,7 +25,13 @@ python3 .reqq/validator/reqq_validate_stdlib.py adopt --version 1.1.0
 ```
 
 Repositories that already carry a drifted copy of `.reqq/` run `adopt` to record their
-current hashes, then reconcile against `v1.1.0` — either a PR that pulls the file back
+current hashes, then reconcile against `v1.0.0` — either a PR that pulls the file back
 to canon, or a deliberate `local_overrides` entry for a difference that is meant to stay.
 
 ---
+
+## [toolkit-v1.1.0]() (2026-09-11)
+
+
+No changes in this release.
+
