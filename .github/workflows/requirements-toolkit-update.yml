@@ -1,0 +1,327 @@
+name: requirements (toolkit update)
+
+# Acts on an available toolkit release instead of just annotating it (reqquest/reqQuestFramework#6).
+# `requirements-toolkit-check.yml` already tells a green CI run "there's a newer version" via
+# `::warning::`, but nobody reads the log of a green run — this workflow gives that signal a
+# durable home, per the level configured in `toolkit.update_check` (ADR-TOOLKIT-001 D5):
+#   notify — open/update a tracking issue, close it once .reqq/toolkit.lock catches up
+#   pr     — run `upgrade` and open/update a draft-or-ready PR with the result
+# `off` (and any unrecognised value) does nothing. Runs only on its own schedule and
+# on-demand — never on push/pull_request, so it can never turn an adopter's unrelated
+# commit red (same isolation requirements-toolkit-check.yml relies on per #4).
+#
+# Mutation (issues/PRs) lives here in `gh` CLI, not in reqq_validate_stdlib.py, matching
+# release.yml / republish-toolkit.yml / gemini-review.yml — the validator stays
+# read-only/stdlib-only and only grows a facts query (`check --format json`).
+# GitHub-only: both jobs use `gh`/GitHub Actions constructs, so this workflow only ever
+# runs for a GitHub-hosted adopter. `toolkit.host` (github | gitlab) is declared in
+# config.yaml for a future adapter, but nothing here branches on it yet.
+#
+# Optional secret: TOOLKIT_UPDATE_TOKEN (fine-grained PAT / GitHub App installation token
+# with contents:write + pull-requests:write + workflows:write) — needed by the `pr` job
+# only when an upgrade touches `.github/workflows/*`, which the default GITHUB_TOKEN can
+# never push. Falls back to GITHUB_TOKEN when unset.
+
+on:
+  schedule:
+    - cron: "37 6 * * 1"   # weekly, offset from requirements-toolkit-check.yml's own cron
+  workflow_dispatch:
+
+concurrency:
+  group: requirements-toolkit-update-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read   # actions/checkout needs this explicitly once any permission is set —
+                        # otherwise every unspecified scope defaults to `none` and checkout
+                        # cannot fetch the repository in a private adopter repo.
+      issues: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve toolkit update state
+        id: state
+        run: |
+          CHECK_JSON="$RUNNER_TEMP/toolkit-check.json"
+          python3 .reqq/validator/reqq_validate_stdlib.py check --format json > "$CHECK_JSON" || true
+          cat "$CHECK_JSON"
+          if jq -e '.error' "$CHECK_JSON" >/dev/null 2>&1; then
+            echo "::notice::check --format json returned an error, nothing to act on: $(jq -r '.error.message' "$CHECK_JSON")"
+            echo "mode=off" >> "$GITHUB_OUTPUT"
+            echo "has_update=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "mode=$(jq -r '.update_check' "$CHECK_JSON")" >> "$GITHUB_OUTPUT"
+          echo "has_update=$(jq -r '.has_update' "$CHECK_JSON")" >> "$GITHUB_OUTPUT"
+          echo "current_version=$(jq -r '.toolkit_version' "$CHECK_JSON")" >> "$GITHUB_OUTPUT"
+          echo "latest_version=$(jq -r '.latest_version' "$CHECK_JSON")" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure the tracking label exists
+        if: steps.state.outputs.mode == 'notify'
+        run: |
+          gh label create toolkit-update --color 0e8a16 \
+            --description "Toolkit update tracking issue (reqquest/reqQuestFramework#6)" --force
+
+      - name: Find the existing tracking issue
+        if: steps.state.outputs.mode == 'notify'
+        id: existing
+        run: |
+          NUM=$(gh issue list --label toolkit-update --state open --json number -q '.[0].number // empty')
+          echo "number=$NUM" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update the tracking issue
+        if: steps.state.outputs.mode == 'notify' && steps.state.outputs.has_update == 'true'
+        run: |
+          CHECK_JSON="$RUNNER_TEMP/toolkit-check.json"
+          BODY_MD="$RUNNER_TEMP/toolkit-issue-body.md"
+          TITLE="Toolkit update available: ${{ steps.state.outputs.current_version }} → ${{ steps.state.outputs.latest_version }}"
+          {
+            echo "A newer reqQuest Framework toolkit release is available."
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Current | \`${{ steps.state.outputs.current_version }}\` |"
+            echo "| Latest | \`${{ steps.state.outputs.latest_version }}\` |"
+            echo
+            echo "Upgrade with:"
+            echo '```'
+            jq -r '.upgrade_command' "$CHECK_JSON"
+            echo '```'
+            echo
+            echo "## CHANGELOG"
+            echo
+            jq -r '.changelog_delta' "$CHECK_JSON"
+            echo
+            echo "_Kept in sync by \`requirements-toolkit-update.yml\` — closes automatically once \`.reqq/toolkit.lock\` reaches ${{ steps.state.outputs.latest_version }}._"
+          } > "$BODY_MD"
+          if [ -n "${{ steps.existing.outputs.number }}" ]; then
+            gh issue edit "${{ steps.existing.outputs.number }}" --title "$TITLE" --body-file "$BODY_MD"
+          else
+            gh issue create --title "$TITLE" --label toolkit-update --body-file "$BODY_MD"
+          fi
+
+      - name: Close the tracking issue once the lock has caught up
+        if: steps.state.outputs.mode == 'notify' && steps.state.outputs.has_update == 'false' && steps.existing.outputs.number != ''
+        run: |
+          gh issue close "${{ steps.existing.outputs.number }}" \
+            --comment "toolkit.lock is now at v${{ steps.state.outputs.current_version }} — no update outstanding, closing."
+
+  pr:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      # The toolkit boundary includes `.github/workflows/requirements-*.yml`, so a normal
+      # upgrade can touch Actions workflow files — the default GITHUB_TOKEN is explicitly
+      # forbidden from pushing those. Set the optional TOOLKIT_UPDATE_TOKEN repo/org secret
+      # to a fine-grained PAT or GitHub App installation token with `contents: write` +
+      # `pull-requests: write` + `workflows: write` to support that case; upgrades that
+      # don't touch workflow files keep working on the default token either way.
+      GH_TOKEN: ${{ secrets.TOOLKIT_UPDATE_TOKEN || secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Resolve the adopter's base branch
+        id: repo
+        run: |
+          echo "base=$(gh api "repos/${{ github.repository }}" --jq .default_branch)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.repo.outputs.base }}
+          token: ${{ secrets.TOOLKIT_UPDATE_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Resolve toolkit update state
+        id: state
+        run: |
+          CHECK_JSON="$RUNNER_TEMP/toolkit-check.json"
+          python3 .reqq/validator/reqq_validate_stdlib.py check --format json > "$CHECK_JSON" || true
+          cat "$CHECK_JSON"
+          if jq -e '.error' "$CHECK_JSON" >/dev/null 2>&1; then
+            echo "::notice::check --format json returned an error, nothing to act on: $(jq -r '.error.message' "$CHECK_JSON")"
+            echo "mode=off" >> "$GITHUB_OUTPUT"
+            echo "has_update=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "mode=$(jq -r '.update_check' "$CHECK_JSON")" >> "$GITHUB_OUTPUT"
+          echo "has_update=$(jq -r '.has_update' "$CHECK_JSON")" >> "$GITHUB_OUTPUT"
+          echo "current_version=$(jq -r '.toolkit_version' "$CHECK_JSON")" >> "$GITHUB_OUTPUT"
+          echo "latest_version=$(jq -r '.latest_version' "$CHECK_JSON")" >> "$GITHUB_OUTPUT"
+
+      - name: Configure Git
+        if: steps.state.outputs.mode == 'pr' && steps.state.outputs.has_update == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Check whether the update branch is safe to touch
+        if: steps.state.outputs.mode == 'pr' && steps.state.outputs.has_update == 'true'
+        id: branch
+        run: |
+          BRANCH="toolkit-update/${{ steps.state.outputs.latest_version }}"
+          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
+          EXPECTED_SHA=""
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            EXPECTED_SHA=$(git ls-remote --heads origin "$BRANCH" | cut -f1)
+            git fetch origin "$BRANCH"
+            LAST_AUTHOR=$(git log -1 --format=%an FETCH_HEAD)
+            if [ "$LAST_AUTHOR" != "github-actions[bot]" ]; then
+              echo "::notice::$BRANCH has commits from $LAST_AUTHOR — a human is already on it, skipping"
+              echo "safe=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          echo "safe=true" >> "$GITHUB_OUTPUT"
+          echo "expected_sha=$EXPECTED_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Run upgrade
+        if: steps.state.outputs.mode == 'pr' && steps.state.outputs.has_update == 'true' && steps.branch.outputs.safe == 'true'
+        id: upgrade
+        run: |
+          git checkout -B "${{ steps.branch.outputs.name }}"
+          # Preserve a known-good copy of the validator before it can be touched by the
+          # upgrade below — reqq_validate_stdlib.py is itself in the toolkit boundary, so a
+          # conflicting local override can leave merge markers in the working tree's copy,
+          # and the PR-body step must not import that.
+          cp .reqq/validator/reqq_validate_stdlib.py "$RUNNER_TEMP/pristine_reqq_validate_stdlib.py"
+          RC=0
+          python3 .reqq/validator/reqq_validate_stdlib.py upgrade \
+            --version "${{ steps.state.outputs.latest_version }}" --format json > "$RUNNER_TEMP/toolkit-upgrade.json" || RC=$?
+          cat "$RUNNER_TEMP/toolkit-upgrade.json"
+          # exit 2 ("applied but needs a human" — conflicts, overwritten changes, collisions,
+          # blocked removals) is the expected draft-PR path, not a failure; only a genuine
+          # config error (exit 3) should fail this job.
+          if [ "$RC" != "0" ] && [ "$RC" != "2" ]; then
+            echo "::error::upgrade exited $RC"
+            exit 1
+          fi
+          echo "needs_attention=$(jq -r '.needs_attention' "$RUNNER_TEMP/toolkit-upgrade.json")" >> "$GITHUB_OUTPUT"
+          echo "already_up_to_date=$(jq -r '.already_up_to_date' "$RUNNER_TEMP/toolkit-upgrade.json")" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push
+        if: steps.state.outputs.mode == 'pr' && steps.state.outputs.has_update == 'true' && steps.branch.outputs.safe == 'true' && steps.upgrade.outputs.already_up_to_date == 'false'
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git add -A
+            git commit -m "chore(toolkit): upgrade to v${{ steps.state.outputs.latest_version }}"
+            # An explicit lease (recorded before `upgrade` ran) instead of a blind `-f`: if a
+            # human pushed to this branch in the meantime, the lease is stale and the push
+            # stops instead of overwriting their commit. Empty expected value means the ref
+            # must still not exist remotely (the initially-absent-branch case).
+            git push --force-with-lease="${{ steps.branch.outputs.name }}:${{ steps.branch.outputs.expected_sha }}" \
+              origin "HEAD:${{ steps.branch.outputs.name }}"
+          else
+            echo "::notice::upgrade produced no working-tree changes — nothing to push"
+          fi
+
+      - name: Build the PR body
+        if: steps.state.outputs.mode == 'pr' && steps.state.outputs.has_update == 'true' && steps.branch.outputs.safe == 'true' && steps.upgrade.outputs.already_up_to_date == 'false'
+        env:
+          UPGRADE_JSON: ${{ runner.temp }}/toolkit-upgrade.json
+          BODY_MD: ${{ runner.temp }}/toolkit-pr-body.md
+          PRISTINE_VALIDATOR: ${{ runner.temp }}/pristine_reqq_validate_stdlib.py
+        run: |
+          python3 - <<'PY'
+          import importlib.util
+          import json, os
+
+          # Load the pre-upgrade copy saved by the previous step, never the working tree's
+          # post-upgrade one — that file is itself in the toolkit boundary, so a conflicting
+          # local override can leave merge markers in it, and importing that would raise
+          # SyntaxError here instead of letting the (expected, exit-2) draft PR get opened.
+          spec = importlib.util.spec_from_file_location(
+              "reqq_validate_stdlib", os.environ["PRISTINE_VALIDATOR"])
+          V = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(V)
+
+          doc = json.load(open(os.environ["UPGRADE_JSON"]))
+          is_fallback = doc.get("mode") == "full_alignment_fallback"
+          lines = [
+              f"Upgrade to toolkit v{doc['to_version']} (from v{doc['from_version']}, "
+              f"channel: {doc['channel']}).",
+              "",
+          ]
+          if is_fallback:
+              lines.append(
+                  f"⚠ merge base v{doc['from_version']} was unavailable "
+                  f"({doc['fallback_reason']}) — fell back to a full alignment against "
+                  f"v{doc['to_version']} instead of a 3-way merge."
+              )
+              lines.append("")
+          by_action = {}
+          for f in doc["files"]:
+              by_action.setdefault(f["action"], []).append(f["path"])
+          # The fallback's plan/summary use the `align` shape (ADD/OVERWRITE/KEEP/LOCAL_ONLY/
+          # COLLISION, no conflicts/merge_failed/overwritten_changes/removal_blocked keys) —
+          # reading it with the normal-upgrade labels/keys below would KeyError or silently
+          # print nothing (reqQuestFramework#8 review).
+          labels = V._ALIGN_ACTION_LABELS if is_fallback else V._UPGRADE_STATE_LABELS
+          for action, label in labels:
+              paths = by_action.get(action)
+              if not paths:
+                  continue
+              lines.append(f"**{label}**: {len(paths)}")
+              lines.extend(f"- `{p}`" for p in sorted(paths))
+              lines.append("")
+          s = doc["summary"]
+          if is_fallback:
+              lines.append(
+                  f"Added: {s['added']} · Overwritten: {s['overwritten']} · "
+                  f"Kept: {s['kept']} · Local-only: {s['local_only']} · "
+                  f"Collisions: {s['collisions']}"
+              )
+              if not doc["lock_written"]:
+                  lines.append("")
+                  lines.append(
+                      f"**`.reqq/toolkit.lock` NOT written** — {s['collisions']} unresolved "
+                      "file/directory collision(s); resolve them and re-run the upgrade."
+                  )
+          else:
+              lines.append(
+                  f"Conflicts: {s['conflicts']} · Overwritten local changes: "
+                  f"{s['overwritten_changes']} · Merge failed: {s['merge_failed']} · "
+                  f"Collisions: {s['collisions']} · Removal blocked: {s['removal_blocked']}"
+              )
+          lines += ["", "## CHANGELOG", "", doc.get("changelog_delta") or "(no changelog delta)", ""]
+          lines.append(
+              "_Opened/updated automatically by `requirements-toolkit-update.yml`. Marked as a "
+              "draft because this run needs a human — resolve conflicts / review overwritten "
+              "changes before merging._"
+              if doc["needs_attention"] else
+              "_Opened/updated automatically by `requirements-toolkit-update.yml`._"
+          )
+          with open(os.environ["BODY_MD"], "w") as fh:
+              fh.write("\n".join(lines))
+          PY
+
+      - name: Open or update the upgrade PR
+        if: steps.state.outputs.mode == 'pr' && steps.state.outputs.has_update == 'true' && steps.branch.outputs.safe == 'true' && steps.upgrade.outputs.already_up_to_date == 'false'
+        run: |
+          BASE="${{ steps.repo.outputs.base }}"
+          BRANCH="${{ steps.branch.outputs.name }}"
+          BODY_MD="$RUNNER_TEMP/toolkit-pr-body.md"
+          TITLE="chore(toolkit): upgrade to v${{ steps.state.outputs.latest_version }}"
+          NEEDS_ATTENTION="${{ steps.upgrade.outputs.needs_attention }}"
+          DRAFT_FLAG=""
+          if [ "$NEEDS_ATTENTION" = "true" ]; then DRAFT_FLAG="--draft"; fi
+          EXISTING=$(gh pr list --head "$BRANCH" --base "$BASE" --state open --json number -q '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh pr edit "$EXISTING" --title "$TITLE" --body-file "$BODY_MD"
+            # `gh pr edit` cannot flip draft state — a rerun whose result now needs a human
+            # must not leave a previously-ready PR looking mergeable, and vice versa. Check
+            # the current state first so we only call `gh pr ready` when it actually needs to
+            # change, and let a real API/permission failure fail the job instead of a blanket
+            # `|| true` silently leaving the PR in the wrong state.
+            IS_DRAFT=$(gh pr view "$EXISTING" --json isDraft -q .isDraft)
+            if [ "$NEEDS_ATTENTION" = "true" ] && [ "$IS_DRAFT" != "true" ]; then
+              gh pr ready "$EXISTING" --undo
+            elif [ "$NEEDS_ATTENTION" != "true" ] && [ "$IS_DRAFT" = "true" ]; then
+              gh pr ready "$EXISTING"
+            fi
+          else
+            gh pr create --base "$BASE" --head "$BRANCH" --title "$TITLE" --body-file "$BODY_MD" $DRAFT_FLAG
+          fi

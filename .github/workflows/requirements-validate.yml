@@ -1,13 +1,15 @@
 name: requirements
 
+# The toolkit update/drift check does NOT run here — it lives in its own workflow
+# (requirements-toolkit-check.yml), triggered only by `schedule` and `workflow_dispatch`.
+# Publishing a toolkit release must never turn an adopter's unrelated push/PR red
+# (reqquest/reqQuestFramework#4).
 on:
   # `push` is scoped to the long-lived branches on purpose: a branch with an open PR would
   # otherwise run this twice per commit, once for the push and once for the synchronize.
   push:
     branches: [main, develop]
   pull_request:
-  schedule:
-    - cron: "17 6 * * 1"   # weekly: surface a new toolkit release without waiting for a push
 
 # Superseded commits do not need their own run.
 concurrency:
@@ -22,10 +24,3 @@ jobs:
 
       - name: Validate requirements
         run: python3 .reqq/validator/reqq_validate_stdlib.py --all
-
-      - name: Toolkit version check
-        # Level comes from `toolkit.update_check` in .reqq/validator/config.yaml (ADR D5).
-        # At `ci-notify` this annotates and never fails.
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python3 .reqq/validator/reqq_validate_stdlib.py check --ci
