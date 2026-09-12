@@ -30,8 +30,10 @@ to canon, or a deliberate `local_overrides` entry for a difference that is meant
 
 ---
 
-## [toolkit-v1.1.0]() (2026-09-11)
+## [toolkit-v1.2.0]() (2026-09-12)
 
+### Added
 
-No changes in this release.
+* feat(toolkit): orchestratable upgrade — JSON output, offline mode, align, non-gating update checks (#8) - mkarwasz-reqquest-dev
+
 
