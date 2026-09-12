@@ -454,6 +454,22 @@ def test_check_format_json_not_adopted_error():
     assert doc == {"error": {"code": "NOT_ADOPTED", "message": doc["error"]["message"]}}
 
 
+def test_check_format_json_corrupt_lock_error_code():
+    """reqquest/reqQuestFramework#8 review: `check --format json` used to hit
+    `load_toolkit_lock`'s non-strict `_die` before `--format json` ever got a chance to apply,
+    so a corrupt lock exited 3 with empty stdout instead of the promised error document —
+    same class of bug `upgrade --format json` was already fixed for (PR #49 review, see
+    `test_upgrade_format_json_corrupt_lock_error_code`)."""
+    root = Path(tempfile.mkdtemp())
+    with temp_repo_root(root) as lock_path:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text("{not valid json")
+        rc, out = _capture_stdout(cmd_check, ["--format", "json"])
+    assert rc == 3
+    doc = json.loads(out)
+    assert doc["error"]["code"] == "LOCK_CORRUPT"
+
+
 # --- State 1: unchanged file replaced ----------------------------------------
 
 def test_state1_unchanged_file_replaced():
@@ -1281,6 +1297,55 @@ def test_upgrade_missing_base_fallback_collision_blocks_lock_write():
     assert lock_after["toolkit_version"] == "1.0.0", \
         "a collision must not be papered over by advancing the lock's toolkit_version"
     assert (root / schema).is_dir(), "the colliding path must be left exactly as it was"
+
+
+def test_upgrade_missing_base_fallback_json_has_already_up_to_date():
+    """reqquest/reqQuestFramework#8 review: the full_alignment_fallback document omitted
+    `already_up_to_date`, so a caller reading it generically across both upgrade shapes (as
+    `requirements-toolkit-update.yml` does via `jq -r '.already_up_to_date'`) got `null`
+    instead of `false` — `null != 'false'` silently skipped the commit/push/PR steps, so the
+    fallback's changes vanished with the runner."""
+    schema = ".reqq/schema/requirement.schema.json"
+    root = _adopted_repo({schema: '{"v":1}'})
+    b_blob = _tar_gz({schema: '{"v":2}'})
+    releases = [_release("toolkit-v1.1.0", ASSET_B, b_blob)]
+    blobs = {f"https://cdn.example/toolkit-v1.1.0/{ASSET_B}": b_blob}
+
+    with temp_repo_root(root), stub_release_channel(releases, blobs):
+        rc, out = _capture_stdout(cmd_upgrade, ["--channel", "stable", "--format", "json"])
+
+    doc = json.loads(out)
+    assert rc == 2, rc
+    assert doc["mode"] == "full_alignment_fallback"
+    assert doc["already_up_to_date"] is False
+
+
+def test_upgrade_missing_base_fallback_lock_uses_release_boundary_not_kept_manifest():
+    """reqquest/reqQuestFramework#8 review: when `toolkit-manifest.json` itself is a kept
+    local_override, the fallback correctly copies files per the RELEASE's manifest (per
+    `adopt --align`'s reqQuestFramework#5 fix, `align_globs = _toolkit_boundary_globs(new_root)`)
+    but lock regeneration re-derived the boundary from ROOT's own (untouched, stale) manifest —
+    a new file the release's manifest added would land on disk but never make it into the lock
+    or drift detection. `_regenerate_lock_after_upgrade` must be handed the release's own
+    boundary in this case, exactly like `adopt --align` already does."""
+    manifest = "toolkit-manifest.json"
+    old_manifest = json.dumps({"boundary": [manifest, "old.txt"]})
+    root = _adopted_repo({manifest: old_manifest, "old.txt": "old\n"}, overrides=[manifest])
+
+    new_manifest = json.dumps({"boundary": [manifest, "old.txt", "extra.txt"]})
+    b_blob = _tar_gz({manifest: new_manifest, "old.txt": "old\n", "extra.txt": "new\n"})
+    releases = [_release("toolkit-v1.1.0", ASSET_B, b_blob)]
+    blobs = {f"https://cdn.example/toolkit-v1.1.0/{ASSET_B}": b_blob}
+
+    with temp_repo_root(root), stub_release_channel(releases, blobs):
+        rc = cmd_upgrade(["--channel", "stable"])
+        lock_after = load_toolkit_lock()
+
+    assert rc == 2, rc
+    assert (root / "extra.txt").read_text() == "new\n", "the release's new file must be applied"
+    assert "extra.txt" in lock_after["files"], (
+        "the lock must record every file the RELEASE's boundary ships, not just the ones "
+        "the stale, kept local manifest already knew about")
 
 
 # --- Adopter install: the tarball must stand on its own ------------------------

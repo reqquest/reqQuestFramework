@@ -239,15 +239,28 @@ jobs:
           spec.loader.exec_module(V)
 
           doc = json.load(open(os.environ["UPGRADE_JSON"]))
+          is_fallback = doc.get("mode") == "full_alignment_fallback"
           lines = [
               f"Upgrade to toolkit v{doc['to_version']} (from v{doc['from_version']}, "
               f"channel: {doc['channel']}).",
               "",
           ]
+          if is_fallback:
+              lines.append(
+                  f"⚠ merge base v{doc['from_version']} was unavailable "
+                  f"({doc['fallback_reason']}) — fell back to a full alignment against "
+                  f"v{doc['to_version']} instead of a 3-way merge."
+              )
+              lines.append("")
           by_action = {}
           for f in doc["files"]:
               by_action.setdefault(f["action"], []).append(f["path"])
-          for action, label in V._UPGRADE_STATE_LABELS:
+          # The fallback's plan/summary use the `align` shape (ADD/OVERWRITE/KEEP/LOCAL_ONLY/
+          # COLLISION, no conflicts/merge_failed/overwritten_changes/removal_blocked keys) —
+          # reading it with the normal-upgrade labels/keys below would KeyError or silently
+          # print nothing (reqQuestFramework#8 review).
+          labels = V._ALIGN_ACTION_LABELS if is_fallback else V._UPGRADE_STATE_LABELS
+          for action, label in labels:
               paths = by_action.get(action)
               if not paths:
                   continue
@@ -255,11 +268,24 @@ jobs:
               lines.extend(f"- `{p}`" for p in sorted(paths))
               lines.append("")
           s = doc["summary"]
-          lines.append(
-              f"Conflicts: {s['conflicts']} · Overwritten local changes: "
-              f"{s['overwritten_changes']} · Merge failed: {s['merge_failed']} · "
-              f"Collisions: {s['collisions']} · Removal blocked: {s['removal_blocked']}"
-          )
+          if is_fallback:
+              lines.append(
+                  f"Added: {s['added']} · Overwritten: {s['overwritten']} · "
+                  f"Kept: {s['kept']} · Local-only: {s['local_only']} · "
+                  f"Collisions: {s['collisions']}"
+              )
+              if not doc["lock_written"]:
+                  lines.append("")
+                  lines.append(
+                      f"**`.reqq/toolkit.lock` NOT written** — {s['collisions']} unresolved "
+                      "file/directory collision(s); resolve them and re-run the upgrade."
+                  )
+          else:
+              lines.append(
+                  f"Conflicts: {s['conflicts']} · Overwritten local changes: "
+                  f"{s['overwritten_changes']} · Merge failed: {s['merge_failed']} · "
+                  f"Collisions: {s['collisions']} · Removal blocked: {s['removal_blocked']}"
+              )
           lines += ["", "## CHANGELOG", "", doc.get("changelog_delta") or "(no changelog delta)", ""]
           lines.append(
               "_Opened/updated automatically by `requirements-toolkit-update.yml`. Marked as a "

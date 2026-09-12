@@ -131,6 +131,7 @@ instead of the normal upgrade shape, tagged `"mode": "full_alignment_fallback"` 
 `"needs_attention": true`:
   {
     "command": "upgrade", "mode": "full_alignment_fallback", "dry_run": false,
+    "already_up_to_date": false,
     "lock_written": true,
     "from_version": "1.1.0", "to_version": "1.4.0", "channel": "stable",
     "fallback_reason": "RELEASE_NOT_FOUND: No release found for tag 'toolkit-v1.1.0' in ...",
@@ -155,7 +156,11 @@ This never happens for the TARGET release — a missing/unverifiable vB fails th
 command (exit 3, `RELEASE_NOT_FOUND`/`ASSET_MISSING`/etc.) before any plan is computed, since
 there is no release to align *to* either. It also never happens in offline mode
 (`--base-payload`/`--target-payload`) — the caller hands in a base directly, so there is
-nothing to fall back from. `changelog_delta` is always `null` here (the delta needs a real
+nothing to fall back from. `already_up_to_date` is always `false` here — the fallback only
+runs once the normal already-up-to-date check above has already passed, so a caller reading
+this field generically across both the normal-upgrade and fallback shapes (as
+`requirements-toolkit-update.yml` does) never sees it missing (reqQuestFramework#8 review).
+`changelog_delta` is always `null` here (the delta needs a real
 `from_version` release to start counting from). A BASE that fails checksum verification
 against a release body that DOES publish SHA256SUMS (`CHECKSUM_MISMATCH`) is not "missing" —
 that looks like tampering or a corrupt transfer, and still fails hard with exit 3 instead of
@@ -1093,7 +1098,7 @@ def cmd_check(args) -> int:
     distinguishable, since a caller that treats a failed lookup as "no update" would
     incorrectly close a still-open tracking issue. `latest_version` is also `null` whenever
     `has_update` is `null`. Errors use the same `{"error": {"code": ..., "message": ...}}`
-    shape (codes: NOT_ADOPTED, LOCK_MISSING_VERSION).
+    shape (codes: NOT_ADOPTED, LOCK_CORRUPT, LOCK_MISSING_VERSION).
     """
     ap = argparse.ArgumentParser(prog="reqq_validate_stdlib.py check")
     ap.add_argument("--ci", action="store_true",
@@ -1126,7 +1131,12 @@ def cmd_check(args) -> int:
         if parsed.ci and update_check == "off":
             return 0
 
-    lock = load_toolkit_lock()
+    try:
+        lock = load_toolkit_lock(strict=True)
+    except ToolkitError as e:
+        if as_json:
+            return _emit_toolkit_error("json", e.code, str(e))
+        _die(3, str(e))
     if lock is None:
         if as_json:
             return _emit_toolkit_error("json", "NOT_ADOPTED",
@@ -1937,7 +1947,8 @@ def _emit_toolkit_error(fmt: str, code: str, message: str, exit_code: int = 3) -
 
 def _regenerate_lock_after_upgrade(old_lock: Dict[str, Any], version: str,
                                    channel: str, source: str,
-                                   override_hashes: Optional[Dict[str, str]] = None) -> None:
+                                   override_hashes: Optional[Dict[str, str]] = None,
+                                   globs: Optional[Tuple[List[str], List[str]]] = None) -> None:
     """D6 state 6: rewrite `toolkit.lock` from the upgraded working tree.
 
     New `toolkit_version` / `installed_at` / recomputed hashes; `local_overrides` and
@@ -1949,9 +1960,18 @@ def _regenerate_lock_after_upgrade(old_lock: Dict[str, Any], version: str,
     local content's OWN hash would make it read as "unchanged since lock" on the very next
     upgrade and get silently REPLACEd before `local_overrides` is ever consulted — the same
     class of bug `adopt --align`'s KEEP handling already guards against.
+
+    `globs` (reqQuestFramework#8 review): the boundary (include, exclude) to hash against,
+    already derived from the TARGET release's own `toolkit-manifest.json` by the
+    full-alignment-fallback caller. Re-deriving it here from ROOT would read the adopter's
+    own `toolkit-manifest.json` instead — if that path was itself `--keep`/`local_overrides`
+    and so left untouched by the alignment, the lock would silently miss any file the new
+    boundary added, even though alignment just copied it onto disk. `None` (the normal,
+    non-fallback upgrade path) keeps re-deriving from ROOT, exactly as before, since a normal
+    3-way merge already brings ROOT's own manifest in line with the target release.
     """
     files_dict = {p.relative_to(ROOT).as_posix(): _sha256_file(p)
-                  for p in _toolkit_boundary_files()}
+                  for p in _toolkit_boundary_files(globs=globs)}
     for rel, digest in (override_hashes or {}).items():
         if rel in files_dict:
             files_dict[rel] = digest
@@ -2134,8 +2154,10 @@ def cmd_upgrade(args) -> int:
         lock_blocked_by_collision = fallback_reason is not None and bool(result.get("collisions"))
         lock_written = not parsed.dry_run and not lock_blocked_by_collision
         if lock_written:
-            _regenerate_lock_after_upgrade(lock, target_version, channel, source,
-                                           override_hashes=keep_release_hashes)
+            _regenerate_lock_after_upgrade(
+                lock, target_version, channel, source,
+                override_hashes=keep_release_hashes,
+                globs=align_globs if fallback_reason is not None else None)
 
     changelog_delta = None if (offline or fallback_reason is not None) else \
         _changelog_delta(source, channel, current_version, target_version)
@@ -2149,6 +2171,7 @@ def cmd_upgrade(args) -> int:
                 "command": "upgrade",
                 "mode": "full_alignment_fallback",
                 "dry_run": parsed.dry_run,
+                "already_up_to_date": False,
                 "lock_written": lock_written,
                 "from_version": current_version,
                 "to_version": target_version,
