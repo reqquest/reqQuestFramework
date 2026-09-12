@@ -33,7 +33,7 @@ from reqq_validate_stdlib import (
     ToolkitError, _semver_tuple, _semver_lt, _normalize_version, _toolkit_boundary_files,
     _sha256_file, _compute_upgrade_plan, _apply_upgrade_plan, _latest_release_tag,
     _parse_sha256sums, _extract_tar_safely, _find_payload_root,
-    cmd_adopt, cmd_upgrade, load_toolkit_lock,
+    cmd_adopt, cmd_check, cmd_upgrade, load_toolkit_lock,
 )
 
 
@@ -246,6 +246,212 @@ def test_toolkit_lock_is_excluded_from_its_own_boundary():
         cmd_adopt(["--version", "1.0.0"])
         assert lock_path not in _toolkit_boundary_files()
         assert ".reqq/toolkit.lock" not in json.loads(lock_path.read_text())["files"]
+
+
+# --- Check: an available update must never fail CI (reqquest/reqQuestFramework#4) --------
+
+def _make_checked_repo(update_check: str) -> Path:
+    """An adopted repo, pinned at v1.0.0, configured with the given `update_check` level."""
+    root = _make_adoptable_repo()
+    (root / ".reqq" / "validator" / "config.yaml").write_text(
+        "require_full_traceability: true\n"
+        "toolkit:\n"
+        "  update_channel: stable\n"
+        f"  update_check: {update_check}\n")
+    with temp_repo_root(root):
+        assert cmd_adopt(["--version", "1.0.0"]) == 0
+    return root
+
+
+_NEWER_RELEASE = [{"tag_name": "toolkit-v1.1.0", "prerelease": False}]
+
+
+def test_check_ci_update_available_never_fails_at_ci_notify():
+    root = _make_checked_repo("ci-notify")
+    with temp_repo_root(root), stub_github(_NEWER_RELEASE):
+        assert cmd_check(["--ci"]) == 0
+
+
+def test_check_ci_update_available_never_fails_at_ci_pr():
+    """The regression this issue fixes: `ci-pr` used to signal exit 2 on an available
+    update alone, which turned every unrelated push/PR red the day a release shipped."""
+    root = _make_checked_repo("ci-pr")
+    with temp_repo_root(root), stub_github(_NEWER_RELEASE):
+        assert cmd_check(["--ci"]) == 0
+
+
+def test_check_ci_manual_level_stays_a_no_op_even_with_drift():
+    """`manual` means no CI operation at all — not even the drift check runs."""
+    root = _make_checked_repo("manual")
+    (root / ".reqq" / "schema" / "requirement.schema.json").write_text('{"type":"object","x":1}')
+    with temp_repo_root(root):
+        assert cmd_check(["--ci"]) == 0
+
+
+def test_check_drift_fails_identically_with_and_without_ci():
+    """Local drift is a fact about the repo — it must gate the pipeline in both modes,
+    unlike an available update (reqquest/reqQuestFramework#4, proposal point 3)."""
+    for update_check in ("ci-notify", "ci-pr"):
+        root = _make_checked_repo(update_check)
+        (root / ".reqq" / "schema" / "requirement.schema.json").write_text(
+            '{"type":"object","x":1}')
+        with temp_repo_root(root), stub_github(_NEWER_RELEASE):
+            assert cmd_check([]) == 2, f"plain run did not fail on drift ({update_check})"
+        with temp_repo_root(root), stub_github(_NEWER_RELEASE):
+            assert cmd_check(["--ci"]) == 2, f"--ci did not fail on drift ({update_check})"
+
+
+def test_check_ci_no_drift_no_update_is_clean():
+    root = _make_checked_repo("ci-pr")
+    with temp_repo_root(root), stub_github([{"tag_name": "toolkit-v1.0.0", "prerelease": False}]):
+        assert cmd_check(["--ci"]) == 0
+
+
+# --- Level rename (reqquest/reqQuestFramework#6): off | notify | pr -----------
+
+def _capture_stderr(fn, *args, **kwargs):
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        rc = fn(*args, **kwargs)
+    return rc, buf.getvalue()
+
+
+def test_normalize_update_check_canonical_values_pass_through():
+    for level in ("off", "notify", "pr"):
+        assert V._normalize_update_check(level) == (level, False)
+
+
+def test_normalize_update_check_deprecated_aliases_map_and_warn():
+    assert V._normalize_update_check("manual") == ("off", True)
+    assert V._normalize_update_check("ci-notify") == ("notify", True)
+    assert V._normalize_update_check("ci-pr") == ("pr", True)
+
+
+def test_normalize_update_check_unknown_value_falls_back_to_off_with_warning():
+    """A typo must never silently escalate to a level that mutates GitHub."""
+    assert V._normalize_update_check("cii-notify") == ("off", True)
+
+
+def test_check_plain_warns_once_on_deprecated_level_and_behaves_like_its_alias():
+    root = _make_checked_repo("ci-notify")
+    with temp_repo_root(root), stub_github(_NEWER_RELEASE):
+        rc, err = _capture_stderr(cmd_check, [])
+    assert rc == 0
+    assert err.count("deprecated") == 1
+    assert "notify" in err and "ci-notify" in err
+
+
+def test_check_ci_warns_once_on_deprecated_level_via_annotation():
+    root = _make_checked_repo("manual")
+    with temp_repo_root(root):
+        rc, out = _capture_stdout(cmd_check, ["--ci"])
+    assert rc == 0
+    assert out.count("::warning::") == 1
+    assert "deprecated" in out and "off" in out
+
+
+def test_check_format_json_reports_update_available():
+    root = _make_checked_repo("notify")
+    with temp_repo_root(root), stub_github(_NEWER_RELEASE):
+        rc, out = _capture_stdout(cmd_check, ["--format", "json"])
+    assert rc == 0
+    doc = json.loads(out)
+    assert doc["command"] == "check"
+    assert doc["toolkit_version"] == "1.0.0"
+    assert doc["latest_version"] == "1.1.0"
+    assert doc["has_update"] is True
+    assert doc["has_drift"] is False
+    assert doc["update_check"] == "notify"
+    assert doc["host"] == "github"
+    assert doc["upgrade_command"] == (
+        "python3 .reqq/validator/reqq_validate_stdlib.py upgrade --version 1.1.0")
+    assert doc["changelog_delta"] is not None
+
+
+def test_check_format_json_no_update_has_null_changelog_and_command():
+    root = _make_checked_repo("notify")
+    with temp_repo_root(root), stub_github([{"tag_name": "toolkit-v1.0.0", "prerelease": False}]):
+        rc, out = _capture_stdout(cmd_check, ["--format", "json"])
+    assert rc == 0
+    doc = json.loads(out)
+    assert doc["has_update"] is False
+    assert doc["changelog_delta"] is None
+    assert doc["upgrade_command"] is None
+
+
+def test_check_format_json_reports_drift():
+    root = _make_checked_repo("pr")
+    (root / ".reqq" / "schema" / "requirement.schema.json").write_text('{"type":"object","x":1}')
+    with temp_repo_root(root), stub_github(_NEWER_RELEASE):
+        rc, out = _capture_stdout(cmd_check, ["--format", "json"])
+    assert rc == 2
+    doc = json.loads(out)
+    assert doc["has_drift"] is True
+
+
+def test_check_format_json_ignores_off_level_and_ci_flag():
+    """`--format json` is a facts query for the update workflow — deciding whether to act
+    on the level is the caller's job, unlike the `--ci` short-circuit in plain mode."""
+    root = _make_checked_repo("off")
+    with temp_repo_root(root), stub_github(_NEWER_RELEASE):
+        rc, out = _capture_stdout(cmd_check, ["--ci", "--format", "json"])
+    assert rc == 0
+    doc = json.loads(out)
+    assert doc["has_update"] is True
+    assert doc["update_check"] == "off"
+
+
+def test_check_format_json_host_passthrough_and_default():
+    root = _make_checked_repo("notify")
+    with temp_repo_root(root), stub_github([{"tag_name": "toolkit-v1.0.0", "prerelease": False}]):
+        rc, out = _capture_stdout(cmd_check, ["--format", "json"])
+    assert json.loads(out)["host"] == "github"
+
+    (root / ".reqq" / "validator" / "config.yaml").write_text(
+        "require_full_traceability: true\n"
+        "toolkit:\n"
+        "  update_channel: stable\n"
+        "  update_check: notify\n"
+        "  host: gitlab\n")
+    with temp_repo_root(root), stub_github([{"tag_name": "toolkit-v1.0.0", "prerelease": False}]):
+        rc, out = _capture_stdout(cmd_check, ["--format", "json"])
+    assert json.loads(out)["host"] == "gitlab"
+
+
+@contextlib.contextmanager
+def stub_github_raises():
+    """Simulate a release-lookup failure (network error, rate limit, ...)."""
+    saved = V._github_api_get
+    def _raise(endpoint):
+        raise V.ToolkitError("GitHub API 503: Service Unavailable", code="GITHUB_API_ERROR")
+    V._github_api_get = _raise
+    try:
+        yield
+    finally:
+        V._github_api_get = saved
+
+
+def test_check_format_json_lookup_failure_is_unknown_not_false():
+    """A failed release lookup must surface as `null`, not `false` — a workflow that treats
+    it as "no update" would incorrectly close a still-open tracking issue (#6 review)."""
+    root = _make_checked_repo("notify")
+    with temp_repo_root(root), stub_github_raises():
+        rc, out = _capture_stdout(cmd_check, ["--format", "json"])
+    assert rc == 0
+    doc = json.loads(out)
+    assert doc["has_update"] is None
+    assert doc["latest_version"] is None
+    assert doc["changelog_delta"] is None
+    assert doc["upgrade_command"] is None
+
+
+def test_check_format_json_not_adopted_error():
+    root = Path(tempfile.mkdtemp())
+    with temp_repo_root(root):
+        rc, out = _capture_stdout(cmd_check, ["--format", "json"])
+    assert rc == 3
+    doc = json.loads(out)
+    assert doc == {"error": {"code": "NOT_ADOPTED", "message": doc["error"]["message"]}}
 
 
 # --- State 1: unchanged file replaced ----------------------------------------
@@ -558,7 +764,8 @@ def test_shipped_config_toolkit_block_parses_to_valid_values():
     tk = V.load_config().get("toolkit")
     assert tk, "config.yaml must carry a toolkit: block (ADR-TOOLKIT-001 D5)"
     assert tk.get("update_channel") in ("stable", "next"), tk
-    assert tk.get("update_check") in ("manual", "ci-notify", "ci-pr"), tk
+    assert tk.get("update_check") in ("off", "notify", "pr", "manual", "ci-notify", "ci-pr"), tk
+    assert tk.get("host") in ("github", "gitlab"), tk
 
 
 def test_toolkit_lock_is_declared_in_reqqignore():
@@ -670,7 +877,9 @@ def stub_release_channel(releases: list, blobs: dict):
             for r in releases:
                 if r["tag_name"] == want:
                     return r
-            raise ToolkitError(f"GitHub API 404: Not Found ({want})")
+            # Mirrors the real 404 path (_github_api_get) so tests exercise the same
+            # code _fetch_release_by_tag normalizes into RELEASE_NOT_FOUND.
+            raise ToolkitError(f"GitHub API 404: Not Found ({want})", code="GITHUB_API_NOT_FOUND")
         if "/releases?" in endpoint or endpoint.endswith("/releases"):
             page = int(endpoint.split("page=")[-1]) if "page=" in endpoint else 1
             return releases if page == 1 else []
@@ -857,6 +1066,223 @@ def test_upgrade_missing_asset_exits_3():
         assert cmd_upgrade(["--channel", "stable"]) == 3
 
 
+# --- upgrade: missing-base (vA) fallback to full alignment (reqQuestFramework#7) --------
+
+def test_upgrade_missing_base_release_falls_back_to_full_alignment():
+    """The adopted (vA) tag was deleted entirely — no 3-way merge is possible. Falls back to
+    a full alignment against vB instead of failing the whole upgrade."""
+    schema = ".reqq/schema/requirement.schema.json"
+    root = _adopted_repo({schema: '{"v":1}'})
+    b_blob = _tar_gz({schema: '{"v":2}'})
+    releases = [_release("toolkit-v1.1.0", ASSET_B, b_blob)]  # toolkit-v1.0.0 is absent
+    blobs = {f"https://cdn.example/toolkit-v1.1.0/{ASSET_B}": b_blob}
+
+    with temp_repo_root(root), stub_release_channel(releases, blobs):
+        rc = cmd_upgrade(["--channel", "stable"])
+        lock = load_toolkit_lock()
+
+    assert rc == 2, rc
+    assert (root / schema).read_text() == '{"v":2}'
+    assert lock["toolkit_version"] == "1.1.0"
+
+
+def test_upgrade_missing_base_asset_falls_back_to_full_alignment():
+    """The vA release still exists but its tarball asset was removed from it."""
+    schema = ".reqq/schema/requirement.schema.json"
+    root = _adopted_repo({schema: '{"v":1}'})
+    rel_a = _release("toolkit-v1.0.0", ASSET_A, b"unused")
+    rel_a["assets"] = []  # release exists, asset gone
+    b_blob = _tar_gz({schema: '{"v":2}'})
+    releases = [_release("toolkit-v1.1.0", ASSET_B, b_blob), rel_a]
+    blobs = {f"https://cdn.example/toolkit-v1.1.0/{ASSET_B}": b_blob}
+
+    with temp_repo_root(root), stub_release_channel(releases, blobs):
+        rc = cmd_upgrade(["--channel", "stable"])
+        lock = load_toolkit_lock()
+
+    assert rc == 2, rc
+    assert (root / schema).read_text() == '{"v":2}'
+    assert lock["toolkit_version"] == "1.1.0"
+
+
+def test_upgrade_missing_base_checksum_falls_back_to_full_alignment():
+    """The vA release exists and has the asset, but its body never got a SHA256SUMS entry —
+    unverifiable, so treated the same as genuinely missing."""
+    schema = ".reqq/schema/requirement.schema.json"
+    root = _adopted_repo({schema: '{"v":1}'})
+    a_blob = _tar_gz({schema: '{"v":1}'})
+    rel_a = {
+        "tag_name": "toolkit-v1.0.0", "prerelease": False, "body": "no sums here",
+        "assets": [{"name": ASSET_A, "browser_download_url": f"https://cdn.example/toolkit-v1.0.0/{ASSET_A}"}],
+    }
+    b_blob = _tar_gz({schema: '{"v":2}'})
+    releases = [_release("toolkit-v1.1.0", ASSET_B, b_blob), rel_a]
+    blobs = {f"https://cdn.example/toolkit-v1.0.0/{ASSET_A}": a_blob,
+             f"https://cdn.example/toolkit-v1.1.0/{ASSET_B}": b_blob}
+
+    with temp_repo_root(root), stub_release_channel(releases, blobs):
+        rc = cmd_upgrade(["--channel", "stable"])
+
+    assert rc == 2, rc
+    assert (root / schema).read_text() == '{"v":2}'
+
+
+def test_upgrade_base_checksum_mismatch_does_not_fall_back_exits_3():
+    """A base whose bytes disagree with a PUBLISHED SHA256SUMS entry looks like tampering or
+    a corrupt transfer, not a missing release — must fail loudly (reqQuestFramework#7), never
+    silently fall back to overwriting the working tree."""
+    schema = ".reqq/schema/requirement.schema.json"
+    root = _adopted_repo({schema: '{"v":1}'})
+    a_blob = _tar_gz({schema: '{"v":1}'})
+    b_blob = _tar_gz({schema: '{"v":2}'})
+    releases = [_release("toolkit-v1.1.0", ASSET_B, b_blob),
+                _release("toolkit-v1.0.0", ASSET_A, a_blob)]
+    # Serve tampered bytes for vA while its release body still lists the clean digest.
+    blobs = {f"https://cdn.example/toolkit-v1.0.0/{ASSET_A}": a_blob + b"tampered",
+             f"https://cdn.example/toolkit-v1.1.0/{ASSET_B}": b_blob}
+
+    with temp_repo_root(root), stub_release_channel(releases, blobs):
+        rc = cmd_upgrade(["--channel", "stable"])
+
+    assert rc == 3, rc
+    assert (root / schema).read_text() == '{"v":1}', "must not touch the tree on a hard failure"
+
+
+def test_upgrade_target_missing_never_falls_back_even_if_base_also_missing():
+    """The fallback only ever applies to the BASE — a missing TARGET release always fails
+    the whole command, since there is nothing to align *to* either."""
+    root = _adopted_repo({".reqq/schema/requirement.schema.json": '{"v":1}'})
+    releases = []  # neither toolkit-v1.0.0 nor toolkit-v1.1.0 exist
+
+    with temp_repo_root(root), stub_release_channel(releases, {}):
+        rc = cmd_upgrade(["--version", "1.1.0", "--channel", "stable"])
+        lock = load_toolkit_lock()
+
+    assert rc == 3, rc
+    assert lock["toolkit_version"] == "1.0.0", "must not touch the lock on a hard failure"
+
+
+def test_upgrade_missing_base_fallback_respects_local_overrides_as_keep():
+    """A file declared in the existing lock's local_overrides survives the fallback
+    untouched, same as `--keep` does for `adopt --align`."""
+    # `.reqq/validator/config.yaml` would be a bad choice here — it's excluded from the
+    # toolkit boundary entirely (toolkit-manifest.json), so it would be left alone regardless
+    # of `local_overrides`, and the test would pass without ever exercising the keep-set path.
+    # `.reqq/hooks/pre-commit` IS inside the boundary, so keeping it actually depends on the
+    # fallback consulting `local_overrides`.
+    schema = ".reqq/schema/requirement.schema.json"
+    custom = ".reqq/hooks/pre-commit"
+    root = _adopted_repo({schema: '{"v":1}', custom: "custom: true\n"}, overrides=[custom])
+    b_blob = _tar_gz({schema: '{"v":2}', custom: "custom: false\n"})
+    releases = [_release("toolkit-v1.1.0", ASSET_B, b_blob)]  # base absent
+    blobs = {f"https://cdn.example/toolkit-v1.1.0/{ASSET_B}": b_blob}
+
+    with temp_repo_root(root), stub_release_channel(releases, blobs):
+        rc = cmd_upgrade(["--channel", "stable"])
+
+    assert rc == 2, rc
+    assert (root / schema).read_text() == '{"v":2}', "non-override file is aligned to vB"
+    assert (root / custom).read_text() == "custom: true\n", \
+        "local_overrides path must be kept, not silently overwritten by the fallback"
+
+
+def test_upgrade_missing_base_fallback_format_json():
+    schema = ".reqq/schema/requirement.schema.json"
+    root = _adopted_repo({schema: '{"v":1}'})
+    b_blob = _tar_gz({schema: '{"v":2}'})
+    releases = [_release("toolkit-v1.1.0", ASSET_B, b_blob)]
+    blobs = {f"https://cdn.example/toolkit-v1.1.0/{ASSET_B}": b_blob}
+
+    with temp_repo_root(root), stub_release_channel(releases, blobs):
+        rc, out = _capture_stdout(cmd_upgrade, ["--channel", "stable", "--format", "json"])
+
+    doc = json.loads(out)
+    assert rc == 2, rc
+    assert doc["command"] == "upgrade"
+    assert doc["mode"] == "full_alignment_fallback"
+    assert doc["lock_written"] is True
+    assert doc["from_version"] == "1.0.0"
+    assert doc["to_version"] == "1.1.0"
+    assert doc["needs_attention"] is True
+    assert doc["changelog_delta"] is None
+    assert "RELEASE_NOT_FOUND" in doc["fallback_reason"]
+    actions = {f["path"]: f["action"] for f in doc["files"]}
+    assert actions[schema] == "OVERWRITE"
+
+
+def test_upgrade_missing_base_fallback_records_release_hash_for_kept_override():
+    """PR #54 review: after the fallback KEEPs a local_overrides path, its lock baseline must
+    be the RELEASE's hash of that path (same fix as `adopt --align`'s KEEP handling), not the
+    kept local content's own hash. Otherwise the very next upgrade — even an ordinary
+    non-fallback one — reads the override as "unchanged since lock" and silently REPLACEs it
+    before local_overrides is ever consulted, discarding the customization one run later."""
+    schema = ".reqq/schema/requirement.schema.json"
+    custom = ".reqq/hooks/pre-commit"
+    root = _adopted_repo({schema: '{"v":1}', custom: "custom: true\n"}, overrides=[custom])
+
+    # Fallback 1.0.0 -> 1.1.0: base (toolkit-v1.0.0) is absent, so this goes through full
+    # alignment. The override is kept, but the release's own copy of it differs from local.
+    b_blob = _tar_gz({schema: '{"v":2}', custom: "custom: false\n"})
+    releases_1 = [_release("toolkit-v1.1.0", ASSET_B, b_blob)]
+    blobs_1 = {f"https://cdn.example/toolkit-v1.1.0/{ASSET_B}": b_blob}
+    with temp_repo_root(root), stub_release_channel(releases_1, blobs_1):
+        rc1 = cmd_upgrade(["--channel", "stable"])
+        lock1 = load_toolkit_lock()
+
+    assert rc1 == 2, rc1
+    assert (root / custom).read_text() == "custom: true\n", "the override must survive the fallback"
+    import hashlib
+    assert lock1["files"][custom] == f"sha256:{hashlib.sha256(b'custom: false\n').hexdigest()}", (
+        "the lock baseline for a KEPT path must be the release's hash, not the kept local "
+        "content's own hash")
+
+    # A later, ORDINARY upgrade (base 1.1.0 is now available — no fallback) must still route
+    # the override through a 3-way merge, not silently replace it.
+    asset_c = "raac-toolkit-1.2.0.tar.gz"
+    c_blob = _tar_gz({schema: '{"v":3}', custom: "custom: false\nupdated: true\n"})
+    releases_2 = [_release("toolkit-v1.2.0", asset_c, c_blob),
+                  _release("toolkit-v1.1.0", ASSET_B, b_blob)]
+    blobs_2 = {f"https://cdn.example/toolkit-v1.1.0/{ASSET_B}": b_blob,
+               f"https://cdn.example/toolkit-v1.2.0/{asset_c}": c_blob}
+    with temp_repo_root(root), stub_release_channel(releases_2, blobs_2):
+        rc2, out2 = _capture_stdout(cmd_upgrade, ["--channel", "stable", "--format", "json"])
+
+    doc2 = json.loads(out2)
+    actions2 = {f["path"]: f["action"] for f in doc2["files"]}
+    assert actions2[custom] == "MERGE", (
+        "a kept override must never be silently REPLACEd on the very next upgrade")
+
+
+def test_upgrade_missing_base_fallback_collision_blocks_lock_write():
+    """PR #54 review repro: a directory occupies a release boundary path during the
+    missing-base fallback. Must report a COLLISION and leave the existing lock untouched —
+    same protection `adopt --align` already has (reqQuestFramework#5) — rather than advancing
+    toolkit_version to a release whose boundary isn't fully installed, which would make a
+    re-run read the repo as already up to date and hide the problem forever."""
+    schema = ".reqq/schema/requirement.schema.json"
+    keep_file = ".reqq/schema/keep.json"
+    root = _adopted_repo({keep_file: '{"v":"unrelated"}'})
+    (root / schema).mkdir(parents=True)  # a directory occupies the release's file path
+
+    b_blob = _tar_gz({schema: '{"v":2}', keep_file: '{"v":"unrelated"}'})
+    releases = [_release("toolkit-v1.1.0", ASSET_B, b_blob)]  # base (1.0.0) absent
+    blobs = {f"https://cdn.example/toolkit-v1.1.0/{ASSET_B}": b_blob}
+
+    with temp_repo_root(root), stub_release_channel(releases, blobs):
+        rc, out = _capture_stdout(cmd_upgrade, ["--channel", "stable", "--format", "json"])
+        lock_after = load_toolkit_lock()
+
+    doc = json.loads(out)
+    assert rc == 2, rc
+    assert doc["mode"] == "full_alignment_fallback"
+    assert doc["lock_written"] is False
+    assert {"path": schema, "action": "COLLISION"} in doc["files"]
+    assert doc["summary"]["collisions"] == 1
+    assert lock_after["toolkit_version"] == "1.0.0", \
+        "a collision must not be papered over by advancing the lock's toolkit_version"
+    assert (root / schema).is_dir(), "the colliding path must be left exactly as it was"
+
+
 # --- Adopter install: the tarball must stand on its own ------------------------
 
 def _pack(dest: Path, version: str = "9.9.9") -> Path:
@@ -1010,6 +1436,819 @@ def test_adopt_refuses_to_write_an_empty_lock():
             assert not (root / ".reqq" / "toolkit.lock").exists(), "an empty lock was written"
             return
     raise AssertionError("adopt on an empty boundary must exit 3, not write an empty lock")
+
+
+# --- --format json (issue reqquest/reqQuestFramework#2) ----------------------
+
+def _capture_stdout(fn, *args, **kwargs):
+    """Run `fn`, returning (return_value, everything it printed to stdout).
+
+    Deliberately not the pytest `capsys` fixture: this module doubles as a plain
+    script (see module docstring) and its own `_main()` calls every `test_*`
+    function with zero arguments, so fixtures are not an option here.
+    """
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = fn(*args, **kwargs)
+    return rc, buf.getvalue()
+
+
+def test_adopt_format_json_emits_single_document():
+    root = _make_adoptable_repo()
+    with temp_repo_root(root):
+        rc, out = _capture_stdout(cmd_adopt, ["--version", "1.0.0", "--format", "json"])
+    assert rc == 0
+    doc = json.loads(out)  # fails if anything else shares stdout with the document
+    assert doc["command"] == "adopt"
+    assert doc["version"] == "1.0.0"
+    assert doc["channel"] == "stable"
+    assert doc["lock_path"] == ".reqq/toolkit.lock"
+    assert ".reqq/schema/requirement.schema.json" in doc["files"]
+    assert ".reqq/validator/config.yaml" not in doc["files"]  # outside the boundary (D1)
+    assert doc["local_overrides"] == []
+
+
+def test_adopt_format_json_error_shape():
+    """The empty-boundary failure (`test_adopt_refuses_to_write_an_empty_lock` in `plain`
+    mode) must not `sys.exit` under `--format json` — it returns the error document."""
+    root = Path(tempfile.mkdtemp())
+    (root / "nested").mkdir()  # boundary globs match nothing at ROOT
+    with temp_repo_root(root):
+        rc, out = _capture_stdout(cmd_adopt, ["--version", "1.0.0", "--format", "json"])
+    assert rc == 3
+    doc = json.loads(out)
+    assert doc == {"error": {"code": "EMPTY_BOUNDARY", "message": doc["error"]["message"]}}
+    assert "nothing to adopt" in doc["error"]["message"]
+
+
+def test_upgrade_format_json_state1_replace():
+    root = _adopted_repo({".reqq/schema/requirement.schema.json": '{"v":1}'})
+    a_blob = _tar_gz({".reqq/schema/requirement.schema.json": '{"v":1}'})
+    b_blob = _tar_gz({".reqq/schema/requirement.schema.json": '{"v":2}'})
+    releases = [_release("toolkit-v1.1.0", ASSET_B, b_blob),
+                _release("toolkit-v1.0.0", ASSET_A, a_blob)]
+    blobs = {f"https://cdn.example/toolkit-v1.0.0/{ASSET_A}": a_blob,
+             f"https://cdn.example/toolkit-v1.1.0/{ASSET_B}": b_blob}
+
+    with temp_repo_root(root), stub_release_channel(releases, blobs):
+        rc, out = _capture_stdout(cmd_upgrade, ["--channel", "stable", "--format", "json"])
+
+    assert rc == 0
+    doc = json.loads(out)
+    assert doc["command"] == "upgrade"
+    assert doc["dry_run"] is False
+    assert doc["from_version"] == "1.0.0" and doc["to_version"] == "1.1.0"
+    assert doc["major"] is False
+    assert doc["already_up_to_date"] is False
+    assert doc["needs_attention"] is False
+    assert doc["files"] == [
+        {"path": ".reqq/schema/requirement.schema.json", "action": "REPLACE"},
+    ]
+    assert doc["summary"]["replaced"] == 1
+    assert isinstance(doc["changelog_delta"], str)
+
+
+def test_upgrade_format_json_conflict_sets_needs_attention_and_per_file_flag():
+    schema = ".reqq/schema/requirement.schema.json"
+    root = _adopted_repo({schema: "COMMON\nBASE\n"}, overrides=[schema])
+    (root / schema).write_text("COMMON\nLOCAL EDIT\n")
+    a_blob = _tar_gz({schema: "COMMON\nBASE\n"})
+    b_blob = _tar_gz({schema: "COMMON\nUPSTREAM EDIT\n"})
+    releases = [_release("toolkit-v1.1.0", ASSET_B, b_blob),
+                _release("toolkit-v1.0.0", ASSET_A, a_blob)]
+    blobs = {f"https://cdn.example/toolkit-v1.0.0/{ASSET_A}": a_blob,
+             f"https://cdn.example/toolkit-v1.1.0/{ASSET_B}": b_blob}
+
+    with temp_repo_root(root), stub_release_channel(releases, blobs):
+        rc, out = _capture_stdout(cmd_upgrade, ["--channel", "stable", "--format", "json"])
+
+    assert rc == 2
+    doc = json.loads(out)
+    assert doc["needs_attention"] is True
+    assert doc["files"] == [{"path": schema, "action": "MERGE", "conflict": True}]
+    assert doc["summary"]["conflicts"] == 1
+
+
+def test_upgrade_format_json_dry_run_reports_conflict_without_touching_tree():
+    """Conflicts must be visible under `--dry-run` too (issue's explicit requirement)."""
+    schema = ".reqq/schema/requirement.schema.json"
+    root = _adopted_repo({schema: "COMMON\nBASE\n"}, overrides=[schema])
+    (root / schema).write_text("COMMON\nLOCAL EDIT\n")
+    a_blob = _tar_gz({schema: "COMMON\nBASE\n"})
+    b_blob = _tar_gz({schema: "COMMON\nUPSTREAM EDIT\n"})
+    releases = [_release("toolkit-v1.1.0", ASSET_B, b_blob),
+                _release("toolkit-v1.0.0", ASSET_A, a_blob)]
+    blobs = {f"https://cdn.example/toolkit-v1.0.0/{ASSET_A}": a_blob,
+             f"https://cdn.example/toolkit-v1.1.0/{ASSET_B}": b_blob}
+
+    with temp_repo_root(root), stub_release_channel(releases, blobs):
+        rc, out = _capture_stdout(
+            cmd_upgrade, ["--channel", "stable", "--dry-run", "--format", "json"])
+        untouched = (root / schema).read_text()
+
+    assert rc == 2
+    doc = json.loads(out)
+    assert doc["dry_run"] is True
+    assert doc["files"] == [{"path": schema, "action": "MERGE", "conflict": True}]
+    assert untouched == "COMMON\nLOCAL EDIT\n", "dry-run must not touch the working tree"
+
+
+def test_upgrade_format_json_already_up_to_date():
+    root = _adopted_repo({".reqq/schema/requirement.schema.json": '{"v":1}'}, version="1.1.0")
+    b_blob = _tar_gz({".reqq/schema/requirement.schema.json": '{"v":1}'})
+    releases = [_release("toolkit-v1.1.0", ASSET_B, b_blob)]
+
+    with temp_repo_root(root), stub_release_channel(releases, {}):
+        rc, out = _capture_stdout(cmd_upgrade, ["--channel", "stable", "--format", "json"])
+
+    assert rc == 0
+    doc = json.loads(out)
+    assert doc["already_up_to_date"] is True
+    assert doc["files"] == []
+    assert doc["summary"]["replaced"] == 0
+    assert doc["needs_attention"] is False
+
+
+def test_upgrade_format_json_not_adopted_error():
+    root = Path(tempfile.mkdtemp())
+    with temp_repo_root(root):
+        rc, out = _capture_stdout(cmd_upgrade, ["--format", "json"])
+    assert rc == 3
+    doc = json.loads(out)
+    assert doc == {"error": {"code": "NOT_ADOPTED", "message": doc["error"]["message"]}}
+
+
+def test_upgrade_format_json_checksum_mismatch_error_code():
+    root = _adopted_repo({".reqq/schema/requirement.schema.json": '{"v":1}'})
+    a_blob = _tar_gz({".reqq/schema/requirement.schema.json": '{"v":1}'})
+    b_blob = _tar_gz({".reqq/schema/requirement.schema.json": '{"v":2}'})
+    releases = [_release("toolkit-v1.1.0", ASSET_B, b_blob),
+                _release("toolkit-v1.0.0", ASSET_A, a_blob)]
+    blobs = {f"https://cdn.example/toolkit-v1.0.0/{ASSET_A}": a_blob,
+             f"https://cdn.example/toolkit-v1.1.0/{ASSET_B}": b_blob + b"tampered"}
+
+    with temp_repo_root(root), stub_release_channel(releases, blobs):
+        rc, out = _capture_stdout(cmd_upgrade, ["--channel", "stable", "--format", "json"])
+
+    assert rc == 3
+    doc = json.loads(out)
+    assert doc["error"]["code"] == "CHECKSUM_MISMATCH"
+
+
+def test_upgrade_format_json_invalid_version_error_code():
+    """PR #49 review: an explicit `--version` that isn't valid SemVer used to slip past the
+    release-determination try/except (`_normalize_version` only strips prefixes, it doesn't
+    validate) and blow up in the `_semver_lt` comparison below it — reaching `main()`'s
+    catch-all `_die` and exiting with plain text even under `--format json`."""
+    root = _adopted_repo({".reqq/schema/requirement.schema.json": '{"v":1}'})
+    with temp_repo_root(root):
+        rc, out = _capture_stdout(
+            cmd_upgrade, ["--version", "not-a-version", "--format", "json"])
+    assert rc == 3
+    doc = json.loads(out)
+    assert doc["error"]["code"] == "INVALID_VERSION"
+
+
+def test_upgrade_format_json_corrupt_lock_error_code():
+    """PR #49 review: a malformed toolkit.lock used to hit `load_toolkit_lock`'s `_die` before
+    `--format json` ever got a chance to apply."""
+    root = Path(tempfile.mkdtemp())
+    (root / ".reqq").mkdir(parents=True)
+    with temp_repo_root(root) as lock_path:
+        lock_path.write_text("{not valid json")
+        rc, out = _capture_stdout(cmd_upgrade, ["--format", "json"])
+    assert rc == 3
+    doc = json.loads(out)
+    assert doc["error"]["code"] == "LOCK_CORRUPT"
+
+
+def test_upgrade_format_json_merge_failure_is_explicit_not_silent():
+    """PR #49 review: when the `git merge-file` subprocess itself fails to run (not just
+    conflicts), the plan entry used to stay a bare `{path, action}` with no `conflict` key —
+    indistinguishable from a merge nobody looked at. It must carry an explicit `error`."""
+    schema = ".reqq/schema/requirement.schema.json"
+    root = _adopted_repo({schema: "COMMON\nBASE\n"}, overrides=[schema])
+    (root / schema).write_text("COMMON\nLOCAL EDIT\n")
+    a_blob = _tar_gz({schema: "COMMON\nBASE\n"})
+    b_blob = _tar_gz({schema: "COMMON\nUPSTREAM EDIT\n"})
+    releases = [_release("toolkit-v1.1.0", ASSET_B, b_blob),
+                _release("toolkit-v1.0.0", ASSET_A, a_blob)]
+    blobs = {f"https://cdn.example/toolkit-v1.0.0/{ASSET_A}": a_blob,
+             f"https://cdn.example/toolkit-v1.1.0/{ASSET_B}": b_blob}
+
+    saved_run = V.subprocess.run
+    V.subprocess.run = lambda *a, **kw: (_ for _ in ()).throw(OSError("git not found"))
+    try:
+        with temp_repo_root(root), stub_release_channel(releases, blobs):
+            rc, out = _capture_stdout(cmd_upgrade, ["--channel", "stable", "--format", "json"])
+    finally:
+        V.subprocess.run = saved_run
+
+    assert rc == 2
+    doc = json.loads(out)
+    assert doc["needs_attention"] is True
+    assert doc["summary"]["merge_failed"] == 1
+    assert doc["summary"]["merged"] == 0
+    assert doc["files"] == [{
+        "path": schema, "action": "MERGE",
+        "error": {"code": "MERGE_FAILED", "message": "git not found"},
+    }]
+    assert "conflict" not in doc["files"][0]
+
+
+def test_format_json_default_is_plain_text():
+    """Acceptance: text output is unchanged, and stays the default, without the flag."""
+    root = _make_adoptable_repo()
+    with temp_repo_root(root):
+        rc, out = _capture_stdout(cmd_adopt, ["--version", "1.0.0"])
+    assert rc == 0
+    assert out.startswith("✓ adopted toolkit v1.0.0")
+    try:
+        json.loads(out)
+        raise AssertionError("plain-mode output must not parse as JSON")
+    except json.JSONDecodeError:
+        pass
+
+
+# --- Config resolution outside the adopter repo (reqQuestFramework#3) --------
+
+def test_resolve_config_path_prefers_script_location_when_inside_root():
+    """The normal in-repo install: config.yaml sits beside the script itself."""
+    assert V._resolve_config_path() == V._CONFIG_NEXT_TO_SCRIPT
+
+
+def test_config_falls_back_to_root_relative_path_when_script_is_outside_root():
+    """Running the validator from a copy that lives outside the adopter repo (an
+    orchestrator using the target release's script against a different working tree) must
+    still read that repo's config.yaml — the copy's own directory ships no config.yaml,
+    only config.example.yaml."""
+    root = Path(tempfile.mkdtemp())
+    cfg_dir = root / ".reqq" / "validator"
+    cfg_dir.mkdir(parents=True)
+    (cfg_dir / "config.yaml").write_text(
+        "require_full_traceability: false\ntoolkit:\n  update_channel: next\n")
+    with temp_repo_root(root):
+        cfg = V.load_config()
+    assert cfg["require_full_traceability"] is False
+    assert cfg["toolkit"]["update_channel"] == "next"
+
+
+def test_config_missing_at_root_relative_fallback_is_not_an_error():
+    root = Path(tempfile.mkdtemp())
+    with temp_repo_root(root):
+        cfg = V.load_config()
+    assert cfg["require_full_traceability"] is True  # documented default
+
+
+# --- upgrade: offline payload mode (reqQuestFramework#3) ---------------------
+
+def _payload_dir(files: dict) -> Path:
+    """An already-extracted `raac-toolkit-<version>/` directory, no wrapper needed."""
+    dest = Path(tempfile.mkdtemp())
+    for rel, text in files.items():
+        p = dest / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+    return dest
+
+
+def test_upgrade_offline_requires_version():
+    root = _adopted_repo({".reqq/schema/requirement.schema.json": '{"v":1}'})
+    with temp_repo_root(root):
+        rc = cmd_upgrade(["--base-payload", str(_payload_dir({})),
+                          "--target-payload", str(_payload_dir({}))])
+    assert rc == 3
+
+
+def test_upgrade_offline_requires_both_payload_dirs_together():
+    root = _adopted_repo({".reqq/schema/requirement.schema.json": '{"v":1}'})
+    with temp_repo_root(root):
+        rc = cmd_upgrade(["--base-payload", str(_payload_dir({})), "--version", "1.1.0"])
+    assert rc == 3
+
+
+def test_upgrade_offline_bad_args_error_code_under_format_json():
+    root = _adopted_repo({".reqq/schema/requirement.schema.json": '{"v":1}'})
+    with temp_repo_root(root):
+        rc, out = _capture_stdout(cmd_upgrade,
+            ["--base-payload", str(_payload_dir({})), "--format", "json"])
+    assert rc == 3
+    assert json.loads(out)["error"]["code"] == "INVALID_ARGS"
+
+
+def test_upgrade_offline_nonexistent_target_payload_is_rejected_not_treated_as_removal():
+    """P1 regression (PR #50 review): `_find_payload_root` does not check existence, so a
+    mistyped --target-payload used to resolve right back to itself. Fed into
+    `_compute_upgrade_plan`, that read as "the release removed every file" — every
+    unchanged local file got REMOVEd, the adopter's tree was emptied, and toolkit.lock
+    still advanced to the requested version with exit 0. A bad path must be rejected
+    before any plan is computed, leaving the tree and lock untouched."""
+    files_a = {".reqq/schema/requirement.schema.json": '{"type":"object","v":1}'}
+    root = _adopted_repo(files_a)
+    base_dir = _payload_dir(files_a)
+    missing_target = Path(tempfile.mkdtemp()) / "does-not-exist"
+
+    with temp_repo_root(root):
+        rc, out = _capture_stdout(cmd_upgrade,
+            ["--base-payload", str(base_dir), "--target-payload", str(missing_target),
+             "--version", "1.1.0", "--format", "json"])
+        lock = load_toolkit_lock()
+
+    assert rc == 3
+    assert json.loads(out)["error"]["code"] == "PAYLOAD_INVALID"
+    assert (root / ".reqq/schema/requirement.schema.json").read_text() == \
+        '{"type":"object","v":1}', "the adopter's file must not be deleted"
+    assert lock["toolkit_version"] == "1.0.0", "the lock must not advance"
+
+
+def test_upgrade_offline_empty_payload_dir_is_rejected():
+    """An existing but empty directory (e.g. an extraction that silently produced nothing)
+    must be rejected the same way as a missing one — it has no `.reqq/`."""
+    files_a = {".reqq/schema/requirement.schema.json": '{"v":1}'}
+    root = _adopted_repo(files_a)
+    base_dir = _payload_dir(files_a)
+    empty_target = Path(tempfile.mkdtemp())  # exists, but empty — no .reqq/
+
+    with temp_repo_root(root):
+        rc = cmd_upgrade(["--base-payload", str(base_dir), "--target-payload", str(empty_target),
+                          "--version", "1.1.0"])
+
+    assert rc == 3
+    assert (root / ".reqq/schema/requirement.schema.json").read_text() == '{"v":1}'
+
+
+def test_upgrade_offline_payload_pointing_at_a_plain_file_is_rejected():
+    files_a = {".reqq/schema/requirement.schema.json": '{"v":1}'}
+    root = _adopted_repo(files_a)
+    base_dir = _payload_dir(files_a)
+    not_a_dir = Path(tempfile.mkdtemp()) / "payload.tar.gz"
+    not_a_dir.write_bytes(b"not actually extracted")
+
+    with temp_repo_root(root):
+        rc = cmd_upgrade(["--base-payload", str(base_dir), "--target-payload", str(not_a_dir),
+                          "--version", "1.1.0"])
+
+    assert rc == 3
+    assert (root / ".reqq/schema/requirement.schema.json").read_text() == '{"v":1}'
+
+
+def test_upgrade_offline_makes_no_network_calls_and_matches_online_plan():
+    """Acceptance: `upgrade --base-payload … --target-payload … --version X` succeeds with
+    networking disabled and produces the same plan/result as the equivalent online run."""
+    files_a = {".reqq/schema/requirement.schema.json": '{"type":"object","v":1}'}
+    files_b = {".reqq/schema/requirement.schema.json": '{"type":"object","v":2}'}
+
+    # Online baseline.
+    root_online = _adopted_repo(files_a)
+    a_blob, b_blob = _tar_gz(files_a), _tar_gz(files_b)
+    releases = [_release("toolkit-v1.1.0", ASSET_B, b_blob),
+                _release("toolkit-v1.0.0", ASSET_A, a_blob)]
+    blobs = {f"https://cdn.example/toolkit-v1.0.0/{ASSET_A}": a_blob,
+             f"https://cdn.example/toolkit-v1.1.0/{ASSET_B}": b_blob}
+    with temp_repo_root(root_online), stub_release_channel(releases, blobs):
+        rc_online = cmd_upgrade(["--channel", "stable"])
+        lock_online = load_toolkit_lock()
+    assert rc_online == 0
+
+    # Offline: same content, pre-extracted, network calls forbidden.
+    root_offline = _adopted_repo(files_a)
+    base_dir = _payload_dir(files_a)
+    target_dir = _payload_dir(files_b)
+
+    def _forbidden(*_a, **_k):
+        raise AssertionError("offline upgrade must not touch the network")
+
+    saved_api, saved_dl = V._github_api_get, V._http_get_bytes
+    V._github_api_get, V._http_get_bytes = _forbidden, _forbidden
+    try:
+        with temp_repo_root(root_offline):
+            rc_offline = cmd_upgrade(["--base-payload", str(base_dir),
+                                      "--target-payload", str(target_dir),
+                                      "--version", "1.1.0"])
+            lock_offline = load_toolkit_lock()
+    finally:
+        V._github_api_get, V._http_get_bytes = saved_api, saved_dl
+
+    assert rc_offline == 0
+    assert (root_offline / ".reqq/schema/requirement.schema.json").read_text() == \
+        (root_online / ".reqq/schema/requirement.schema.json").read_text()
+    assert lock_offline["toolkit_version"] == lock_online["toolkit_version"] == "1.1.0"
+    assert lock_offline["files"] == lock_online["files"]
+
+
+def test_upgrade_offline_dry_run_touches_nothing():
+    files_a = {".reqq/schema/requirement.schema.json": '{"v":1}'}
+    files_b = {".reqq/schema/requirement.schema.json": '{"v":2}'}
+    root = _adopted_repo(files_a)
+    base_dir = _payload_dir(files_a)
+    target_dir = _payload_dir(files_b)
+
+    with temp_repo_root(root):
+        rc = cmd_upgrade(["--base-payload", str(base_dir), "--target-payload", str(target_dir),
+                          "--version", "1.1.0", "--dry-run"])
+        lock = load_toolkit_lock()
+
+    assert rc == 0
+    assert (root / ".reqq/schema/requirement.schema.json").read_text() == '{"v":1}'
+    assert lock["toolkit_version"] == "1.0.0"
+
+
+def test_upgrade_offline_format_json_omits_changelog_delta():
+    files_a = {".reqq/schema/requirement.schema.json": '{"v":1}'}
+    files_b = {".reqq/schema/requirement.schema.json": '{"v":2}'}
+    root = _adopted_repo(files_a)
+    base_dir = _payload_dir(files_a)
+    target_dir = _payload_dir(files_b)
+
+    with temp_repo_root(root):
+        rc, out = _capture_stdout(cmd_upgrade,
+            ["--base-payload", str(base_dir), "--target-payload", str(target_dir),
+             "--version", "1.1.0", "--format", "json"])
+
+    assert rc == 0
+    doc = json.loads(out)
+    assert doc["changelog_delta"] is None
+
+
+# --- adopt --align (reqQuestFramework#5) --------------------------------------
+
+def _bare_repo(files: dict) -> Path:
+    """A pre-versioning working tree: files on disk, no toolkit.lock."""
+    root = Path(tempfile.mkdtemp())
+    for rel, text in files.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+    return root
+
+
+def test_align_requires_align_flag():
+    """--keep/--payload/--dry-run without --align must be rejected, not silently ignored."""
+    root = _bare_repo({".reqq/schema/requirement.schema.json": '{"v":"local"}'})
+    with temp_repo_root(root):
+        rc, out = _capture_stdout(cmd_adopt,
+            ["--version", "1.0.0", "--keep", ".reqq/schema/requirement.schema.json",
+             "--format", "json"])
+    assert rc == 3
+    assert json.loads(out)["error"]["code"] == "INVALID_ARGS"
+
+
+def test_align_overwrites_differing_adds_missing_keeps_declared():
+    """Acceptance: a pre-versioning repo ends up byte-identical to the release boundary
+    except for --keep paths, with a valid toolkit.lock."""
+    root = _bare_repo({
+        ".reqq/schema/requirement.schema.json": '{"v":"local-plain"}',
+        ".reqq/schema/keep.json": '{"v":"local-keep"}',
+    })
+    payload = _payload_dir({
+        ".reqq/schema/requirement.schema.json": '{"v":"release-plain"}',
+        ".reqq/schema/keep.json": '{"v":"release-keep"}',
+        ".reqq/hooks/pre-commit": "#!/bin/sh\necho hi\n",
+    })
+
+    with temp_repo_root(root) as lock_path:
+        rc = cmd_adopt(["--version", "1.0.0", "--align", "--payload", str(payload),
+                        "--keep", ".reqq/schema/keep.json"])
+        lock = json.loads(lock_path.read_text())
+
+    assert rc == 0
+    assert (root / ".reqq/schema/requirement.schema.json").read_text() == '{"v":"release-plain"}'
+    assert (root / ".reqq/schema/keep.json").read_text() == '{"v":"local-keep"}', \
+        "kept path must not be overwritten"
+    assert (root / ".reqq/hooks/pre-commit").read_text() == "#!/bin/sh\necho hi\n"
+
+    assert lock["toolkit_version"] == "1.0.0"
+    assert lock["local_overrides"] == [".reqq/schema/keep.json"]
+    # The lock records the RELEASE's hash for a kept path, not the kept local content's own
+    # hash — otherwise the kept content would read as "unchanged" on the very next upgrade
+    # and be replaced before local_overrides is ever consulted (PR #52 review; see
+    # test_align_kept_path_three_way_merges_on_an_immediate_later_upgrade).
+    assert lock["files"][".reqq/schema/keep.json"] == \
+        _sha256_file(payload / ".reqq/schema/keep.json")
+    assert lock["files"][".reqq/schema/keep.json"] != \
+        _sha256_file(root / ".reqq/schema/keep.json")
+    assert lock["files"][".reqq/schema/requirement.schema.json"] == \
+        _sha256_file(root / ".reqq/schema/requirement.schema.json")
+
+
+def test_align_identical_file_is_left_alone():
+    files = {".reqq/schema/requirement.schema.json": '{"v":"same"}'}
+    root = _bare_repo(files)
+    payload = _payload_dir(files)
+
+    with temp_repo_root(root):
+        rc, out = _capture_stdout(cmd_adopt,
+            ["--version", "1.0.0", "--align", "--payload", str(payload), "--format", "json"])
+
+    assert rc == 0
+    doc = json.loads(out)
+    assert doc["align"]["files"] == [], "an identical file must produce no align entry"
+    assert doc["align"]["summary"] == {"added": 0, "overwritten": 0, "kept": 0,
+                                        "local_only": 0, "collisions": 0}
+
+
+def test_align_local_only_file_is_reported_never_deleted():
+    """Acceptance: files present locally but not in the release are reported, never deleted."""
+    root = _bare_repo({
+        ".reqq/schema/requirement.schema.json": '{"v":"local"}',
+        ".reqq/schema/legacy.json": '{"v":"legacy, dropped upstream"}',
+    })
+    payload = _payload_dir({".reqq/schema/requirement.schema.json": '{"v":"release"}'})
+
+    with temp_repo_root(root):
+        rc, out = _capture_stdout(cmd_adopt,
+            ["--version", "1.0.0", "--align", "--payload", str(payload), "--format", "json"])
+
+    assert rc == 2, "a local-only file must be reported via a non-zero exit"
+    doc = json.loads(out)
+    assert {"path": ".reqq/schema/legacy.json", "action": "LOCAL_ONLY"} in doc["align"]["files"]
+    assert doc["align"]["needs_attention"] is True
+    assert (root / ".reqq/schema/legacy.json").read_text() == '{"v":"legacy, dropped upstream"}', \
+        "a local-only file must never be deleted"
+
+
+def test_align_keep_path_outside_release_boundary_is_ignored_with_a_warning():
+    root = _bare_repo({".reqq/schema/requirement.schema.json": '{"v":"local"}'})
+    payload = _payload_dir({".reqq/schema/requirement.schema.json": '{"v":"release"}'})
+
+    with temp_repo_root(root) as lock_path:
+        rc = cmd_adopt(["--version", "1.0.0", "--align", "--payload", str(payload),
+                        "--keep", "not/in/the/boundary.txt"])
+        lock = json.loads(lock_path.read_text())
+
+    assert rc == 0
+    assert lock["local_overrides"] == []
+    assert (root / ".reqq/schema/requirement.schema.json").read_text() == '{"v":"release"}'
+
+
+def test_align_dry_run_reports_without_touching_tree_or_writing_lock():
+    """Acceptance: --dry-run --format json lists the differing files without touching the
+    working tree."""
+    root = _bare_repo({".reqq/schema/requirement.schema.json": '{"v":"local"}'})
+    payload = _payload_dir({
+        ".reqq/schema/requirement.schema.json": '{"v":"release"}',
+        ".reqq/hooks/pre-commit": "#!/bin/sh\n",
+    })
+
+    with temp_repo_root(root) as lock_path:
+        rc, out = _capture_stdout(cmd_adopt,
+            ["--version", "1.0.0", "--align", "--payload", str(payload), "--dry-run",
+             "--format", "json"])
+        lock_written = lock_path.exists()
+
+    assert rc == 0
+    assert not lock_written, "--dry-run must not write toolkit.lock"
+    assert (root / ".reqq/schema/requirement.schema.json").read_text() == '{"v":"local"}', \
+        "--dry-run must not touch the working tree"
+    assert not (root / ".reqq/hooks/pre-commit").exists()
+
+    doc = json.loads(out)
+    assert doc["dry_run"] is True
+    assert doc["mode"] == "align"
+    assert "lock_path" not in doc and "files" not in doc, \
+        "a dry run must not report lock fields — nothing was written"
+    actions = {f["path"]: f["action"] for f in doc["align"]["files"]}
+    assert actions[".reqq/schema/requirement.schema.json"] == "OVERWRITE"
+    assert actions[".reqq/hooks/pre-commit"] == "ADD"
+
+
+def test_align_offline_payload_makes_no_network_calls():
+    root = _bare_repo({".reqq/schema/requirement.schema.json": '{"v":"local"}'})
+    payload = _payload_dir({".reqq/schema/requirement.schema.json": '{"v":"release"}'})
+
+    def _forbidden(*_a, **_k):
+        raise AssertionError("--align --payload must not touch the network")
+
+    saved_api, saved_dl = V._github_api_get, V._http_get_bytes
+    V._github_api_get, V._http_get_bytes = _forbidden, _forbidden
+    try:
+        with temp_repo_root(root):
+            rc = cmd_adopt(["--version", "1.0.0", "--align", "--payload", str(payload)])
+    finally:
+        V._github_api_get, V._http_get_bytes = saved_api, saved_dl
+
+    assert rc == 0
+    assert (root / ".reqq/schema/requirement.schema.json").read_text() == '{"v":"release"}'
+
+
+def test_align_downloads_and_verifies_the_payload_when_no_offline_path_is_given():
+    """Without --payload, align must go through the same download + SHA256SUMS verification
+    as upgrade, not trust an unverified source."""
+    root = _bare_repo({".reqq/schema/requirement.schema.json": '{"v":"local"}'})
+    blob = _tar_gz({".reqq/schema/requirement.schema.json": '{"v":"release"}'})
+    releases = [_release("toolkit-v1.0.0", ASSET_A, blob)]
+    blobs = {f"https://cdn.example/toolkit-v1.0.0/{ASSET_A}": blob}
+
+    with temp_repo_root(root) as lock_path, stub_release_channel(releases, blobs):
+        rc = cmd_adopt(["--version", "1.0.0", "--align"])
+        lock = json.loads(lock_path.read_text())
+
+    assert rc == 0
+    assert (root / ".reqq/schema/requirement.schema.json").read_text() == '{"v":"release"}'
+    assert lock["toolkit_version"] == "1.0.0"
+
+
+def test_align_kept_path_three_way_merges_on_an_immediate_later_upgrade():
+    """Acceptance: --keep paths are preserved and listed in local_overrides; a later upgrade
+    merges them (state 2) — even with NO further local edit between align and upgrade.
+
+    P1 regression (PR #52 review): `adopt` used to record the KEPT LOCAL content's own hash
+    as this path's lock baseline. Since nothing touches the file again before the next
+    upgrade, its hash still matched that baseline, so `_is_unchanged()` read it as untouched
+    and picked REPLACE before ever consulting local_overrides — silently discarding the
+    customization the very first time `upgrade` ran. The fix records the RELEASE's hash as
+    the baseline instead, so the kept (diverging) local content always reads as "changed"
+    and routes into MERGE.
+    """
+    root = _bare_repo({".reqq/schema/requirement.schema.json": '{"v":"local"}'})
+    payload = _payload_dir({
+        ".reqq/schema/requirement.schema.json": '{"v":"release-1.0"}',
+    })
+
+    with temp_repo_root(root):
+        assert cmd_adopt(["--version", "1.0.0", "--align", "--payload", str(payload),
+                          "--keep", ".reqq/schema/requirement.schema.json"]) == 0
+        assert (root / ".reqq/schema/requirement.schema.json").read_text() == '{"v":"local"}'
+
+        a_blob = _tar_gz({".reqq/schema/requirement.schema.json": '{"v":"release-1.0"}'})
+        b_blob = _tar_gz({".reqq/schema/requirement.schema.json": '{"v":"release-1.1"}'})
+        releases = [_release("toolkit-v1.1.0", ASSET_B, b_blob),
+                    _release("toolkit-v1.0.0", ASSET_A, a_blob)]
+        blobs = {f"https://cdn.example/toolkit-v1.0.0/{ASSET_A}": a_blob,
+                 f"https://cdn.example/toolkit-v1.1.0/{ASSET_B}": b_blob}
+        with stub_release_channel(releases, blobs):
+            rc, out = _capture_stdout(cmd_upgrade, ["--channel", "stable", "--format", "json"])
+
+    doc = json.loads(out)
+    files_by_path = {f["path"]: f for f in doc["files"]}
+    assert files_by_path[".reqq/schema/requirement.schema.json"]["action"] == "MERGE", (
+        "a kept file must never be silently REPLACEd on the very next upgrade")
+
+
+def test_align_offline_requires_version():
+    """P2 regression (PR #52 review): --align --payload without --version used to fall
+    through to the normal (network) latest-version lookup, mislabeling the supplied payload
+    with whatever the release API currently reports as latest — violating the offline
+    contract `upgrade --base-payload/--target-payload` already enforces."""
+    root = _bare_repo({".reqq/schema/requirement.schema.json": '{"v":"local"}'})
+    payload = _payload_dir({".reqq/schema/requirement.schema.json": '{"v":"release"}'})
+
+    def _forbidden(*_a, **_k):
+        raise AssertionError("--align --payload without --version must fail before any "
+                              "network call, not silently query for the latest version")
+
+    saved_api = V._github_api_get
+    V._github_api_get = _forbidden
+    try:
+        with temp_repo_root(root):
+            rc, out = _capture_stdout(cmd_adopt,
+                ["--align", "--payload", str(payload), "--format", "json"])
+    finally:
+        V._github_api_get = saved_api
+
+    assert rc == 3
+    assert json.loads(out)["error"]["code"] == "INVALID_ARGS"
+    assert not V.TOOLKIT_LOCK.exists()
+
+
+def test_align_keeping_the_manifest_does_not_drop_new_release_files_from_the_lock():
+    """P2 regression (PR #52 review): if --keep preserves an older toolkit-manifest.json,
+    lock generation used to re-derive the boundary from THAT (now-stale) local manifest,
+    silently omitting files the release just introduced — even though align had already
+    copied them onto disk. The lock must be generated from the release's boundary."""
+    old_manifest = json.dumps({"boundary": [".reqq/schema/*.json", "toolkit-manifest.json"]})
+    new_manifest = json.dumps({
+        "boundary": [".reqq/schema/*.json", "toolkit-manifest.json", "extra.txt"],
+    })
+    root = _bare_repo({
+        "toolkit-manifest.json": old_manifest,
+        ".reqq/schema/requirement.schema.json": '{"v":"local"}',
+    })
+    payload = _payload_dir({
+        "toolkit-manifest.json": new_manifest,
+        ".reqq/schema/requirement.schema.json": '{"v":"release"}',
+        "extra.txt": "new in this release\n",
+    })
+
+    with temp_repo_root(root) as lock_path:
+        rc = cmd_adopt(["--version", "1.0.0", "--align", "--payload", str(payload),
+                        "--keep", "toolkit-manifest.json"])
+        lock = json.loads(lock_path.read_text())
+
+    assert rc == 0
+    assert (root / "toolkit-manifest.json").read_text() == old_manifest, \
+        "the kept manifest itself must stay untouched"
+    assert (root / "extra.txt").read_text() == "new in this release\n", \
+        "align must still copy a file the release boundary introduced"
+    assert "extra.txt" in lock["files"], \
+        "a file align copied must not be silently missing from the lock"
+    assert lock["local_overrides"] == ["toolkit-manifest.json"]
+
+
+def test_align_directory_collision_is_reported_not_silently_nested():
+    """P2 regression (PR #52 follow-up review): a local DIRECTORY occupying a release file's
+    path is excluded by `_toolkit_boundary_files()` (`is_file()` only), so it used to read as
+    "absent locally" — the plan picked ADD, and `shutil.copy2(src, a_directory)` silently
+    copied the release file INSIDE that directory instead of occupying the intended path,
+    leaving the required path still a directory and exiting 0. Must instead be reported as a
+    COLLISION, left untouched, with a non-zero exit and no lock written."""
+    root = _bare_repo({".reqq/schema/keep.json": '{"v":"unrelated"}'})
+    (root / ".reqq/schema/requirement.schema.json").mkdir(parents=True)
+    payload = _payload_dir({
+        ".reqq/schema/requirement.schema.json": '{"v":"release"}',
+        ".reqq/schema/keep.json": '{"v":"unrelated"}',
+    })
+
+    with temp_repo_root(root) as lock_path:
+        rc, out = _capture_stdout(cmd_adopt,
+            ["--version", "1.0.0", "--align", "--payload", str(payload), "--format", "json"])
+        lock_written = lock_path.exists()
+
+    assert rc == 2, "a directory/file collision must be reported via a non-zero exit"
+    doc = json.loads(out)
+    assert {"path": ".reqq/schema/requirement.schema.json", "action": "COLLISION"} \
+        in doc["align"]["files"]
+    assert doc["align"]["summary"]["collisions"] == 1
+    assert doc["align"]["needs_attention"] is True
+    assert doc["lock_written"] is False
+    assert "files" not in doc and "lock_path" not in doc, \
+        "no top-level adopt fields must be reported — the lock was not actually written"
+    assert (root / ".reqq/schema/requirement.schema.json").is_dir(), \
+        "the colliding path must be left exactly as it was, not nested into"
+    assert not list((root / ".reqq/schema/requirement.schema.json").iterdir()), \
+        "the release file must not be silently copied inside the local directory"
+    assert not lock_written, \
+        "a collision must not be papered over by writing a lock anyway"
+
+
+def test_align_collision_preserves_the_previous_lock_and_check_still_reports_it():
+    """P2 regression (PR #52 follow-up review): the earlier fix wrote a lock even when a
+    collision was reported — omitting the colliding path (since it isn't a plain file) but
+    otherwise looking clean, so an immediate `check` returned 0 despite the required schema
+    still being a directory. A collision must instead leave any existing lock untouched, so
+    `check` keeps reporting the real (pre-align) state."""
+    files_a = {".reqq/schema/requirement.schema.json": '{"v":"1.0-local"}'}
+    root = _adopted_repo(files_a, version="1.0.0")
+    (root / ".reqq/schema/requirement.schema.json").unlink()
+    (root / ".reqq/schema/requirement.schema.json").mkdir()
+    payload = _payload_dir({".reqq/schema/requirement.schema.json": '{"v":"1.1-release"}'})
+
+    with temp_repo_root(root) as lock_path:
+        pre_lock = json.loads(lock_path.read_text())
+        rc = cmd_adopt(["--version", "1.1.0", "--align", "--payload", str(payload)])
+        post_lock = json.loads(lock_path.read_text())
+        with stub_github([{"tag_name": "toolkit-v1.1.0", "prerelease": False}]):
+            check_rc = cmd_check([])
+
+    assert rc == 2
+    assert post_lock == pre_lock, "the previous lock must be left completely untouched"
+    assert check_rc == 2, \
+        "check must keep reporting the unresolved state, not a falsely clean v1.1.0"
+
+
+def test_align_file_blocking_a_parent_directory_is_reported_not_a_crash():
+    """P2 regression (PR #52 follow-up review): a plain FILE occupying a path the release
+    needs as a directory (e.g. a file at .reqq/schema when the release ships
+    .reqq/schema/requirement.schema.json) reads as "absent locally" the same way a leaf
+    collision does, since `_toolkit_boundary_files()` silently skips through it. Applying
+    the resulting ADD action used to crash with an uncaught FileExistsError from
+    parent.mkdir(parents=True, exist_ok=True). Must be reported as COLLISION instead."""
+    root = _bare_repo({})
+    (root / ".reqq").mkdir(parents=True)
+    (root / ".reqq/schema").write_text("a plain file where the release needs a directory")
+    payload = _payload_dir({".reqq/schema/requirement.schema.json": '{"v":"release"}'})
+
+    with temp_repo_root(root) as lock_path:
+        rc, out = _capture_stdout(cmd_adopt,
+            ["--version", "1.0.0", "--align", "--payload", str(payload), "--format", "json"])
+        lock_written = lock_path.exists()
+
+    assert rc == 2, "a blocked-ancestor collision must be reported, not raise"
+    doc = json.loads(out)
+    assert {"path": ".reqq/schema/requirement.schema.json", "action": "COLLISION"} \
+        in doc["align"]["files"]
+    assert not lock_written
+    assert (root / ".reqq/schema").read_text() == \
+        "a plain file where the release needs a directory", \
+        "the blocking file must be left untouched"
+
+
+def test_align_kept_path_reads_as_drift_immediately_after_align():
+    """Documents the intentional behavior noted in the PR #52 follow-up review: because the
+    lock records the RELEASE's hash (not the kept local content's) for a --keep path, `check`
+    immediately reports it as drift. This is the same "declared but diverging" signal
+    `local_overrides` already carries for a plain `adopt --local-override`, and it is exactly
+    what lets `upgrade` pick MERGE instead of REPLACE on the very next run."""
+    root = _bare_repo({".reqq/schema/requirement.schema.json": '{"v":"local"}'})
+    payload = _payload_dir({".reqq/schema/requirement.schema.json": '{"v":"release"}'})
+
+    with temp_repo_root(root):
+        assert cmd_adopt(["--version", "1.0.0", "--align", "--payload", str(payload),
+                          "--keep", ".reqq/schema/requirement.schema.json"]) == 0
+        with stub_github([{"tag_name": "toolkit-v1.0.0", "prerelease": False}]):
+            rc = cmd_check([])
+
+    assert rc == 2, "a kept override must read as drift right after align, by design"
 
 
 def _main() -> int:

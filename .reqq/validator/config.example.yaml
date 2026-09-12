@@ -20,8 +20,23 @@ exclude_globs: []
 # Toolkit versioning (ADR-TOOLKIT-001 D5). Remove this block to disable the CI check
 # entirely — `check --ci` then exits 0 without doing anything.
 # The stdlib YAML parser does not strip inline comments — keep them on their own line.
+#
+# An available toolkit update NEVER fails `check --ci`, at any level below — only local
+# drift against toolkit.lock does (reqquest/reqQuestFramework#4). The shipped
+# requirements-toolkit-check.yml workflow that runs this also only triggers on `schedule`
+# and `workflow_dispatch`, never on push/pull_request, so publishing a toolkit release can
+# never turn an unrelated commit's CI red.
 toolkit:
   # stable | next
   update_channel: stable
-  # manual | ci-notify | ci-pr
-  update_check: ci-notify
+  # off (no CI operation at all) | notify (opens/updates/closes a tracking issue) |
+  # pr (opens/updates an upgrade PR) — reqquest/reqQuestFramework#6. Acted on by the
+  # scheduled requirements-toolkit-update.yml workflow; `check --ci`'s exit code never
+  # depends on this. Deprecated aliases still work with a one-time warning:
+  # manual -> off, ci-notify -> notify, ci-pr -> pr.
+  update_check: notify
+  # github | gitlab — which host this repo is on. Declared explicitly, not guessed, so a
+  # future GitLab adapter (mirroring ADR-GOV-001 D9) won't force a config migration. Only
+  # `github` is implemented today — requirements-toolkit-update.yml is a GitHub Actions
+  # workflow that opens GitHub issues/PRs via `gh`.
+  host: github

@@ -11,5 +11,7 @@ exclude_globs:
 toolkit:
   # stable | next
   update_channel: stable
-  # manual | ci-notify | ci-pr
-  update_check: ci-notify
+  # off | notify | pr (reqquest/reqQuestFramework#6; manual/ci-notify/ci-pr are deprecated aliases)
+  update_check: notify
+  # github | gitlab (gitlab not yet implemented)
+  host: github

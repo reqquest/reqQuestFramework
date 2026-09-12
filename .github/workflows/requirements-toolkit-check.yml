@@ -1,0 +1,27 @@
+name: requirements (toolkit check)
+
+# Toolkit update/drift check, split out of requirements-validate.yml so that publishing a
+# toolkit release can never turn an adopter's unrelated push/PR red (reqquest/reqQuestFramework#4).
+# Runs only on its own schedule and on-demand — never on `push` or `pull_request`.
+on:
+  schedule:
+    - cron: "17 6 * * 1"   # weekly: surface a new toolkit release without waiting for a push
+  workflow_dispatch:
+
+concurrency:
+  group: requirements-toolkit-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolkit version check
+        # Level comes from `toolkit.update_check` in .reqq/validator/config.yaml (ADR D5).
+        # An available update only ever annotates (::warning::), never fails — local drift
+        # against toolkit.lock is the only condition that exits non-zero here.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 .reqq/validator/reqq_validate_stdlib.py check --ci
