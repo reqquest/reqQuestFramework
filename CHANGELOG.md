@@ -30,10 +30,10 @@ to canon, or a deliberate `local_overrides` entry for a difference that is meant
 
 ---
 
-## [toolkit-v1.2.1]() (2026-09-13)
+## [toolkit-v1.2.2]() (2026-09-13)
 
 ### Fixed
 
-* fix(ci): REQQF#9 — Nyx Publish now actually creates the GitHub Release (#10) - mkarwasz-reqquest-dev
+* fix(toolkit): resolve offline payload root from cwd (#13) - mkarwasz-reqquest-dev
 
 
