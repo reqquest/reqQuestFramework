@@ -290,7 +290,15 @@ def _normalize_update_check(raw: str) -> Tuple[str, bool]:
 
 # --- Paths -------------------------------------------------------------------
 def _find_repo_root() -> Path:
-    """Locate the git repository root; fall back to two levels up from this file."""
+    """Locate the git repository root; fall back to the current working directory.
+
+    Offline payload mode (``upgrade --base-payload/--target-payload``) runs this exact
+    script from a copy living inside the target release payload, against a separate adopter
+    working tree passed in as ``cwd``. The isolated execution environment may deliberately
+    omit ``.git``; then ``git rev-parse --show-toplevel`` fails as expected, and ``cwd`` —
+    not this script's own location inside the payload copy — is the adopter tree where
+    ``TOOLKIT_LOCK`` and the rest of the toolkit must resolve.
+    """
     try:
         out = subprocess.check_output(
             ["git", "rev-parse", "--show-toplevel"],
@@ -298,7 +306,7 @@ def _find_repo_root() -> Path:
         ).decode().strip()
         return Path(out)
     except Exception:
-        return Path(__file__).resolve().parents[2]
+        return Path.cwd()
 
 
 ROOT           = _find_repo_root()

@@ -1765,6 +1765,24 @@ def test_config_missing_at_root_relative_fallback_is_not_an_error():
     assert cfg["require_full_traceability"] is True  # documented default
 
 
+def test_find_repo_root_falls_back_to_cwd_not_script_location():
+    """A payload copy, invoked in a bare adopter tree, must use that tree as ROOT."""
+    script_copy_dir = Path(tempfile.mkdtemp()) / "payload" / ".reqq" / "validator"
+    script_copy_dir.mkdir(parents=True)
+    shutil.copy(_VALIDATOR_DIR / "reqq_validate_stdlib.py",
+                script_copy_dir / "reqq_validate_stdlib.py")
+
+    adopter_tree = Path(tempfile.mkdtemp())  # deliberately no .git anywhere above it
+    proc = subprocess.run(
+        [sys.executable, "-c",
+         f"import sys; sys.path.insert(0, {str(script_copy_dir)!r}); "
+         "import reqq_validate_stdlib as m; print(m.ROOT)"],
+        cwd=adopter_tree, capture_output=True, text=True)
+
+    assert proc.returncode == 0, proc.stderr
+    assert Path(proc.stdout.strip()).resolve() == adopter_tree.resolve()
+
+
 # --- upgrade: offline payload mode (reqQuestFramework#3) ---------------------
 
 def _payload_dir(files: dict) -> Path:
