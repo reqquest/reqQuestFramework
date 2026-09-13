@@ -6,15 +6,24 @@
   "scheme": "SEMVER",
   "stateFile": ".nyx-state.json",
   "verbosity": "INFO",
+  "git": {
+    "remotes": {
+      "origin": {
+        "authenticationMethod": "USER_PASSWORD",
+        "user": "{{#environmentVariable}}GITHUB_TOKEN{{/environmentVariable}}",
+        "password": "{{#environmentVariable}}GITHUB_TOKEN{{/environmentVariable}}"
+      }
+    }
+  },
   "releaseTypes": {
     "publicationServices": ["github"],
     "enabled": ["develop", "mainline", "task", "feature", "internal"],
     "items": {
       "develop": {
-        "description": "Develop integration branch — tag only, no commit (branch protection requires PR)",
+        "description": "Develop integration branch — tag only, no commit (branch protection requires PR); gitPush stays true so Nyx's own publish step considers the tag remote-bound (REQQF#9) — the tag/changelog commit already reach origin via release.yml's own push step regardless",
         "filterTags": "^({{configuration.releasePrefix}})?([0-9]\\d*)\\.([0-9]\\d*)\\.([0-9]\\d*)$",
         "gitCommit": "false",
-        "gitPush": "false",
+        "gitPush": "true",
         "gitTag": "true",
         "matchBranches": "^develop$",
         "matchEnvironmentVariables": {
@@ -23,10 +32,10 @@
         "publish": "true"
       },
       "mainline": {
-        "description": "Main release branch — tag only, no commit (branch protection requires PR, same as develop)",
+        "description": "Main release branch — tag only, no commit (branch protection requires PR, same as develop); gitPush stays true, see develop above (REQQF#9)",
         "filterTags": "^({{configuration.releasePrefix}})?([0-9]\\d*)\\.([0-9]\\d*)\\.([0-9]\\d*)$",
         "gitCommit": "false",
-        "gitPush": "false",
+        "gitPush": "true",
         "gitTag": "true",
         "matchBranches": "^(main|master)$",
         "matchEnvironmentVariables": {

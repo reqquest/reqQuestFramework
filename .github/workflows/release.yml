@@ -90,10 +90,9 @@ jobs:
         run: sudo chown -R "$(whoami):$(id -gn)" .git CHANGELOG.md
 
       # `make` regenerates CHANGELOG.md in the working tree, but every release type sets
-      # `gitCommit: "false"` (branch protection requires a PR), so Nyx never commits it and
-      # the push step below compares commits, not the working tree — the regenerated file
-      # would be thrown away with the runner. Commit it here, before `mark` tags HEAD, so
-      # the tag carries the changelog it describes.
+      # `gitCommit: "false"` (branch protection requires a PR), so Nyx never commits it —
+      # the regenerated file would be thrown away with the runner. Commit it here, before
+      # `publish` tags HEAD, so the tag carries the changelog it describes.
       - name: Commit the regenerated CHANGELOG.md
         if: steps.check_release.outputs.new_release == 'true'
         run: |
@@ -105,7 +104,15 @@ jobs:
             echo "✓ committed the regenerated CHANGELOG.md"
           fi
 
-      - name: Run Nyx Mark
+      # `nyx publish` internally cascades through infer/make/mark in the SAME process
+      # before publishing, so it tags HEAD and immediately publishes the Release from
+      # that one consistent in-memory state (#9). Running `mark` as its own prior
+      # `docker run` — a separate process — used to tag HEAD first; by the time a later
+      # `publish` process started, its own fresh infer() saw the tag already applied and
+      # concluded "no version change, nothing to publish", so no Release was ever created
+      # even though the tag existed. gitPush/git.remotes push the tag and commit as part
+      # of this same publish run.
+      - name: Run Nyx Publish
         if: steps.check_release.outputs.new_release == 'true'
         run: |
           docker run --rm \
@@ -115,37 +122,13 @@ jobs:
             -e GIT_AUTHOR_EMAIL="github-actions[bot]@users.noreply.github.com" \
             -e GIT_COMMITTER_NAME="github-actions[bot]" \
             -e GIT_COMMITTER_EMAIL="github-actions[bot]@users.noreply.github.com" \
-            mooltiverse/nyx:latest mark
-
-      - name: Fix git permissions
-        if: steps.check_release.outputs.new_release == 'true'
-        run: sudo chown -R "$(whoami):$(id -gn)" .git
-
-      - name: Push commits and tags
-        if: steps.check_release.outputs.new_release == 'true'
-        run: |
-          git fetch origin "${{ github.ref_name }}"
-          if git diff --quiet "origin/${{ github.ref_name }}" HEAD; then
-            echo "ℹ️ no new commit to push"
-          elif git push origin "HEAD:${{ github.ref_name }}"; then
-            echo "✓ pushed the changelog commit to ${{ github.ref_name }}"
-          else
-            # A protected branch that refuses the bot must not fail the release — the tag
-            # (pushed below) still carries the changelog. Say so loudly instead of silently
-            # letting CHANGELOG.md rot on the branch.
-            echo "::warning::could not push to ${{ github.ref_name }} — the regenerated CHANGELOG.md is on tag toolkit-v${{ steps.check_release.outputs.version }} but not on the branch; sync it via PR"
-          fi
-          if git tag --points-at HEAD | grep -q .; then
-            git push --tags
-          fi
-
-      - name: Run Nyx Publish
-        if: steps.check_release.outputs.new_release == 'true'
-        run: |
-          docker run --rm \
-            -v "${{ github.workspace }}:/project" -w /project \
-            -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" -e CI=true \
             mooltiverse/nyx:latest publish
+
+      # Nyx runs as root in the container, so everything it wrote back into the workspace
+      # (including .git, via its own tag/push) is root-owned.
+      - name: Fix git permissions after Publish
+        if: always() && steps.check_release.outputs.new_release == 'true'
+        run: sudo chown -R "$(whoami):$(id -gn)" .git
 
       - name: Build toolkit asset
         if: steps.check_release.outputs.new_release == 'true'
