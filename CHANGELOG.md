@@ -30,10 +30,10 @@ to canon, or a deliberate `local_overrides` entry for a difference that is meant
 
 ---
 
-## [toolkit-v1.2.2]() (2026-09-13)
+## [toolkit-v1.2.3]() (2026-09-15)
 
 ### Fixed
 
-* fix(toolkit): resolve offline payload root from cwd (#13) - mkarwasz-reqquest-dev
+* fix(toolkit): reqqf#14 — LOCAL_ONLY requires toolkit.lock history, not just a glob match (#15) - mkarwasz-reqquest-dev
 
 
