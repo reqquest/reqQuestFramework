@@ -1143,6 +1143,30 @@ def test_upgrade_missing_base_checksum_falls_back_to_full_alignment():
     assert (root / schema).read_text() == '{"v":2}'
 
 
+def test_upgrade_missing_base_fallback_malformed_lock_files_field_is_not_a_crash():
+    """Same guard as `adopt --align`'s, but for the missing-base full-alignment fallback — a
+    `toolkit.lock` whose `files` field is not an object must not crash with AttributeError;
+    it is treated as unknown history instead."""
+    schema = ".reqq/schema/requirement.schema.json"
+    root = _adopted_repo({schema: '{"v":1}'})
+    with temp_repo_root(root):
+        lock = load_toolkit_lock()
+        lock["files"] = []  # malformed: should be an object of path -> hash
+        V.write_toolkit_lock(lock)
+
+    b_blob = _tar_gz({schema: '{"v":2}'})
+    releases = [_release("toolkit-v1.1.0", ASSET_B, b_blob)]  # toolkit-v1.0.0 is absent
+    blobs = {f"https://cdn.example/toolkit-v1.1.0/{ASSET_B}": b_blob}
+
+    with temp_repo_root(root), stub_release_channel(releases, blobs):
+        rc, out = _capture_stdout(cmd_upgrade, ["--channel", "stable", "--format", "json"])
+
+    assert rc == 2, rc
+    doc = json.loads(out)
+    assert doc["summary"]["local_only"] == 0
+    assert (root / schema).read_text() == '{"v":2}'
+
+
 def test_upgrade_base_checksum_mismatch_does_not_fall_back_exits_3():
     """A base whose bytes disagree with a PUBLISHED SHA256SUMS entry looks like tampering or
     a corrupt transfer, not a missing release — must fail loudly (reqQuestFramework#7), never
@@ -2031,8 +2055,9 @@ def test_align_identical_file_is_left_alone():
 
 
 def test_align_local_only_file_is_reported_never_deleted():
-    """Acceptance: files present locally but not in the release are reported, never deleted."""
-    root = _bare_repo({
+    """Acceptance: a file this toolkit previously managed (per an existing toolkit.lock) but
+    that the target release no longer ships is reported LOCAL_ONLY, never deleted."""
+    root = _adopted_repo({
         ".reqq/schema/requirement.schema.json": '{"v":"local"}',
         ".reqq/schema/legacy.json": '{"v":"legacy, dropped upstream"}',
     })
@@ -2040,7 +2065,7 @@ def test_align_local_only_file_is_reported_never_deleted():
 
     with temp_repo_root(root):
         rc, out = _capture_stdout(cmd_adopt,
-            ["--version", "1.0.0", "--align", "--payload", str(payload), "--format", "json"])
+            ["--version", "1.1.0", "--align", "--payload", str(payload), "--format", "json"])
 
     assert rc == 2, "a local-only file must be reported via a non-zero exit"
     doc = json.loads(out)
@@ -2048,6 +2073,80 @@ def test_align_local_only_file_is_reported_never_deleted():
     assert doc["align"]["needs_attention"] is True
     assert (root / ".reqq/schema/legacy.json").read_text() == '{"v":"legacy, dropped upstream"}', \
         "a local-only file must never be deleted"
+
+
+def test_align_glob_match_never_recorded_in_a_lock_is_not_local_only():
+    """reqQuestFramework#14 regression: a file that merely matches the release boundary's
+    glob pattern (by name/location), but that no lock ever recorded this toolkit as having
+    shipped in this repo, is NOT LOCAL_ONLY — it is not the toolkit's file at all and must
+    not be reported. Modelled on the real case: `requirements/**/README.md` catching an
+    adopter's own README in a category the toolkit itself never had."""
+    root = _bare_repo({
+        ".reqq/schema/requirement.schema.json": '{"v":"local"}',
+        "requirements/functional/CUSTOM/README.md": "# Our own category, never shipped by the toolkit\n",
+    })
+    payload = _payload_dir({
+        ".reqq/schema/requirement.schema.json": '{"v":"release"}',
+        "requirements/README.md": "# toolkit README\n",
+    })
+    boundary_manifest = {
+        "boundary": [".reqq/schema/*.json", "requirements/README.md",
+                     "requirements/**/README.md"],
+    }
+    (payload / "toolkit-manifest.json").write_text(json.dumps(boundary_manifest))
+
+    with temp_repo_root(root):
+        rc, out = _capture_stdout(cmd_adopt,
+            ["--version", "1.0.0", "--align", "--payload", str(payload), "--format", "json"])
+
+    assert rc == 0, "a file never recorded in any lock must not trigger needs_attention"
+    doc = json.loads(out)
+    paths = {f["path"] for f in doc["align"]["files"]}
+    assert "requirements/functional/CUSTOM/README.md" not in paths, \
+        "a glob match with no lock history must produce no align entry at all"
+    assert doc["align"]["summary"]["local_only"] == 0
+    assert doc["align"]["needs_attention"] is False
+    assert (root / "requirements/functional/CUSTOM/README.md").read_text() == \
+        "# Our own category, never shipped by the toolkit\n", \
+        "an adopter's own file must never be touched"
+
+
+def test_align_malformed_lock_files_field_is_treated_as_no_history_not_a_crash():
+    """A hand-edited toolkit.lock whose `files` is not an object (e.g. a list) must not crash
+    `adopt --align` with AttributeError from a bare `.keys()` call — it is treated the same
+    as no prior lock at all: unknown history, not a fatal error."""
+    root = _bare_repo({".reqq/schema/requirement.schema.json": '{"v":"local"}'})
+    with temp_repo_root(root):
+        V.write_toolkit_lock({
+            "toolkit_version": "1.0.0",
+            "files": [],  # malformed: should be an object of path -> hash
+            "local_overrides": [],
+        })
+        payload = _payload_dir({".reqq/schema/requirement.schema.json": '{"v":"release"}'})
+        rc, out = _capture_stdout(cmd_adopt,
+            ["--version", "1.1.0", "--align", "--payload", str(payload), "--format", "json"])
+
+    assert rc == 0, "a malformed files field must not crash align nor report a false LOCAL_ONLY"
+    doc = json.loads(out)
+    assert doc["align"]["summary"]["local_only"] == 0
+
+
+def test_align_lock_document_itself_not_an_object_is_treated_as_no_history_not_a_crash():
+    """`load_toolkit_lock(strict=True)` only validates that the file is well-formed JSON, not
+    that its top-level document is even an object — a `toolkit.lock` containing just `[]`
+    parses fine and would otherwise crash `_lock_ever_shipped()`'s `lock.get(...)` with
+    AttributeError (a list has no `.get()`). Must be treated as unknown history instead,
+    same as a missing lock."""
+    root = _bare_repo({".reqq/schema/requirement.schema.json": '{"v":"local"}'})
+    with temp_repo_root(root) as lock_path:
+        lock_path.write_text("[]\n")
+        payload = _payload_dir({".reqq/schema/requirement.schema.json": '{"v":"release"}'})
+        rc, out = _capture_stdout(cmd_adopt,
+            ["--version", "1.1.0", "--align", "--payload", str(payload), "--format", "json"])
+
+    assert rc == 0, "a non-object lock document must not crash align nor report a false LOCAL_ONLY"
+    doc = json.loads(out)
+    assert doc["align"]["summary"]["local_only"] == 0
 
 
 def test_align_keep_path_outside_release_boundary_is_ignored_with_a_warning():
