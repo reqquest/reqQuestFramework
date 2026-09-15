@@ -34,9 +34,12 @@ It brings the working tree in line with the target release's own boundary (its
 writing the lock exactly like a normal adopt: every file the release ships is added if
 absent locally and overwritten if it differs, unless its path is listed in `--keep` — a
 kept file is left untouched and recorded in `local_overrides`, same as `--local-override`,
-so a later `upgrade` 3-way-merges it instead of clobbering it. A local file that matches the
-release's boundary patterns but that release does not ship is reported on stderr, never
-deleted; likewise, a release-shipped path occupied locally by something other than a plain
+so a later `upgrade` 3-way-merges it instead of clobbering it. A local file that an EXISTING
+`toolkit.lock` already recorded this toolkit as managing, but that the target release no
+longer ships, is reported on stderr as LOCAL_ONLY, never deleted — a path that merely matches
+the release's boundary glob without ever having been in a lock this toolkit wrote is not
+LOCAL_ONLY at all and is not reported (reqQuestFramework#14); likewise, a release-shipped
+path occupied locally by something other than a plain
 file — a directory at that exact path, or a plain file blocking one of its ancestor
 directories — is reported as a COLLISION and never touched: `_toolkit_boundary_files()`
 silently skips through both cases, so applying them regardless would either let
@@ -196,7 +199,13 @@ file-level align plan on top of the shape above:
 ships this path, but a directory sits at it, or a plain file blocks one of its ancestor
 directories — the path is left exactly as it was) — a path identical in the release and
 locally produces no entry. `needs_attention` is true when at least one LOCAL_ONLY or
-COLLISION path was reported.
+COLLISION path was reported. Above, `.reqq/schema/legacy.json` is LOCAL_ONLY only because an
+EXISTING `toolkit.lock` (a prior v1.1.0 adoption, say) already recorded this toolkit as
+managing that path — align reads any lock already on disk before computing the plan. A path
+that merely matches the release boundary's glob pattern, without ever having been recorded in
+a lock this toolkit wrote, is not LOCAL_ONLY at all and produces no entry — matching the
+pattern by name/location alone (e.g. an adopter's own `requirements/<CUSTOM>/README.md`) does
+not make it the toolkit's file (reqQuestFramework#14).
 
 **A COLLISION aborts before the lock is written.** Its document has `"lock_written": false`
 and, like `--dry-run`, only the top-level `command`/`mode`/`dry_run`/`version`/`source`/
@@ -219,7 +228,7 @@ import argparse, fnmatch, hashlib, io, json, os, re, shutil, socket, subprocess,
 import urllib.error, urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # --- Constants ---------------------------------------------------------------
 ID_PATTERN = r"^(BR|FR|NFR|ADR|TC|POL)-[A-Z0-9]{2,10}-[0-9]{3}$"
@@ -853,8 +862,11 @@ def cmd_adopt(args) -> int:
     `--align` (reqQuestFramework#5) brings a pre-versioning or unanchored repo in line with
     the target release first: every file the release boundary covers is added if absent and
     overwritten if it differs, except `--keep` paths (kept as-is and recorded as
-    local_overrides, same as `--local-override`); a local file the release boundary matches
-    but does not ship is reported, never deleted. The lock is then written exactly like a
+    local_overrides, same as `--local-override`); a local file an EXISTING `toolkit.lock`
+    already recorded this toolkit as managing, but that the target release no longer ships,
+    is reported as LOCAL_ONLY, never deleted — a path that merely matches the release
+    boundary without ever having been in a lock this toolkit wrote is not LOCAL_ONLY and is
+    not reported at all (reqQuestFramework#14). The lock is then written exactly like a
     normal adopt of that version.
     """
     ap = argparse.ArgumentParser(prog="reqq_validate_stdlib.py adopt")
@@ -946,7 +958,23 @@ def cmd_adopt(args) -> int:
                     continue
                 keep_set.add(rel)
 
-            align_plan = _compute_align_plan(payload_root, ROOT, keep_set, globs=align_boundary_globs)
+            # What has this toolkit ever actually shipped/managed in THIS repo, per an
+            # existing lock — as opposed to what merely matches the boundary glob on disk
+            # (reqQuestFramework#14). A fresh/pre-versioning repo has no lock yet, so
+            # `ever_shipped` stays None and every glob match with no release counterpart is
+            # treated as genuinely local, not the toolkit's concern. A corrupt lock is
+            # treated the same way (best-effort) rather than aborting the align.
+            try:
+                existing_lock = load_toolkit_lock(strict=True)
+            except ToolkitError as e:
+                print(f"⚠ ignoring unreadable {TOOLKIT_LOCK.relative_to(ROOT)} for align "
+                      f"history: {e}", file=sys.stderr)
+                existing_lock = None
+            ever_shipped = _lock_ever_shipped(existing_lock)
+
+            align_plan = _compute_align_plan(payload_root, ROOT, keep_set,
+                                              globs=align_boundary_globs,
+                                              ever_shipped=ever_shipped)
             align_result = _apply_align_plan(align_plan, ROOT, dry_run=parsed.dry_run)
             keep_release_hashes = {a["path"]: _sha256_file(Path(a["new"]))
                                     for a in align_plan if a["action"] == "KEEP"}
@@ -1515,8 +1543,33 @@ def _blocked_by_non_directory_ancestor(path: Path, working_root: Path) -> bool:
     return False
 
 
+def _lock_ever_shipped(lock: Any) -> Optional[Set[str]]:
+    """ROOT-relative paths an existing `toolkit.lock` records this toolkit as having
+    hashed/managed in this repo — the `ever_shipped` history `_compute_align_plan()` needs
+    to tell "matches the boundary glob" apart from "was actually ours" (reqQuestFramework#14).
+
+    Returns None — "no usable history", handled by `_compute_align_plan()` the same as "no
+    lock at all" — for a missing lock, a lock whose TOP-LEVEL document isn't even a JSON
+    object, AND a lock whose `files` is not a JSON object (a hand-edited or otherwise
+    malformed lock, e.g. `"files": []` or a lock that is itself a bare `[]`).
+    `load_toolkit_lock(strict=True)` only validates that the file is well-formed JSON, not
+    that its shape is the expected object — a `toolkit.lock` containing just `[]` parses
+    fine and reaches here as a plain `list`, which has no `.get()`. A caller
+    that already guarantees `lock["files"]` is a dict (any lock this module itself wrote)
+    still passes through fine; this only guards the pass-a-lock-you-loaded path against
+    reading a differently-shaped value.
+    """
+    if not isinstance(lock, dict):
+        return None
+    files = lock.get("files")
+    if not isinstance(files, dict):
+        return None
+    return set(files.keys())
+
+
 def _compute_align_plan(payload_root: Path, working_root: Path, keep: set,
-                         globs: Optional[Tuple[List[str], List[str]]] = None) -> List[Dict[str, Any]]:
+                         globs: Optional[Tuple[List[str], List[str]]] = None,
+                         ever_shipped: Optional[Set[str]] = None) -> List[Dict[str, Any]]:
     """Compute an `adopt --align` plan (reqQuestFramework#5).
 
     Unlike `_compute_upgrade_plan` there is no vA — a pre-versioning or unanchored repo has
@@ -1524,6 +1577,17 @@ def _compute_align_plan(payload_root: Path, working_root: Path, keep: set,
     on disk now. The release payload's own `toolkit-manifest.json` decides the boundary for
     both sides (`_toolkit_boundary_files(root, payload_root)`), so a stale or absent local
     manifest never causes the wrong file set to be compared.
+
+    `ever_shipped`, when given, is the set of ROOT-relative paths recorded in an existing
+    `toolkit.lock`'s `files` — i.e. paths some past release of this toolkit actually
+    hashed/managed in this repo (reqQuestFramework#14). A path matching the boundary glob
+    locally but ABSENT from `ever_shipped` (including when `ever_shipped` is None — no prior
+    lock at all, e.g. a genuinely pre-versioning repo) is not this toolkit's business: the
+    glob only says the filename/location happens to look like something the toolkit could
+    ship, not that it ever did — a `README.md` an adopter wrote for their own requirements
+    category, say. Such a path produces no plan entry at all. Only a path the lock says was
+    once managed, but that this release no longer ships, is a real LOCAL_ONLY: something the
+    toolkit used to own and dropped, which the adopter may still be relying on.
 
     Returns a list of {path, action[, new]} dicts, one per path that needs attention:
       ADD        - shipped by the release, absent locally
@@ -1534,8 +1598,11 @@ def _compute_align_plan(payload_root: Path, working_root: Path, keep: set,
                    very next `upgrade` would see the kept content as "unchanged since lock"
                    and REPLACE it before ever consulting local_overrides (reqQuestFramework#5
                    review).
-      LOCAL_ONLY - matches the release boundary locally but the release does not ship it;
-                   reported only, never deleted
+      LOCAL_ONLY - previously recorded in `ever_shipped` (a past release of this toolkit
+                   managed it in this repo) but the current release no longer ships it;
+                   reported only, never deleted. A path that merely matches the boundary
+                   glob without ever having been in the lock is NOT LOCAL_ONLY — see
+                   `ever_shipped` above — and produces no entry.
       COLLISION  - shipped by the release; the local path exists but is not a plain file (a
                    directory, most commonly), OR an ancestor directory the release needs is
                    itself occupied by a plain file — `_toolkit_boundary_files()` silently
@@ -1557,7 +1624,10 @@ def _compute_align_plan(payload_root: Path, working_root: Path, keep: set,
         local_file = local_files.get(rel)
 
         if release_file is None:
-            plan.append({"path": rel, "action": "LOCAL_ONLY"})
+            if ever_shipped is not None and rel in ever_shipped:
+                plan.append({"path": rel, "action": "LOCAL_ONLY"})
+            # else: matches the boundary glob but no lock ever recorded this toolkit as
+            # managing it here — not ours, skip silently (reqQuestFramework#14).
         elif local_file is None:
             target = working_root / rel
             if target.exists() or _blocked_by_non_directory_ancestor(target, working_root):
@@ -1576,7 +1646,8 @@ _ALIGN_ACTION_LABELS = [
     ("ADD",        "added"),
     ("OVERWRITE",  "overwritten with the release version"),
     ("KEEP",       "kept as-is (recorded as local_overrides)"),
-    ("LOCAL_ONLY", "present locally but not shipped by this release — kept, not deleted"),
+    ("LOCAL_ONLY", "previously managed by this toolkit but not shipped by this release — "
+                   "kept, not deleted"),
     ("COLLISION",  "shipped by the release but occupied locally by something other than a "
                    "plain file — left untouched, reconcile by hand"),
 ]
@@ -1607,8 +1678,8 @@ def _apply_align_plan(plan: List[Dict[str, Any]], working_root: Path,
             collision_files.append(action["path"])
 
     if local_only_files:
-        print(f"⚠ present locally but not shipped by this release (kept, not deleted): "
-              f"{', '.join(sorted(local_only_files))}", file=sys.stderr)
+        print(f"⚠ previously managed by this toolkit but not shipped by this release "
+              f"(kept, not deleted): {', '.join(sorted(local_only_files))}", file=sys.stderr)
     if collision_files:
         print(f"⚠ shipped by this release but occupied locally by something other than a "
               f"plain file — left untouched, reconcile by hand: "
@@ -1631,8 +1702,8 @@ def _print_align_report(version: str, plan: List[Dict[str, Any]], result: Dict[s
         for p in sorted(paths):
             print(f"  - {p}")
     if result["local_only"]:
-        print(f"\n⚠ {result['local_only']} file(s) present locally but not shipped by this "
-              f"release — reconcile by hand")
+        print(f"\n⚠ {result['local_only']} file(s) previously managed by this toolkit but "
+              f"not shipped by this release — reconcile by hand")
     if result["collisions"]:
         print(f"\n⚠ {result['collisions']} path(s) shipped by this release are occupied "
               f"locally by something other than a plain file — reconcile by hand")
@@ -2138,7 +2209,17 @@ def cmd_upgrade(args) -> int:
             if fallback_reason is not None:
                 keep_set = set(lock.get("local_overrides", []))
                 align_globs = _toolkit_boundary_globs(new_root)
-                plan = _compute_align_plan(new_root, ROOT, keep_set, globs=align_globs)
+                # `lock` (the adopted toolkit's own record) is the source of truth for what
+                # this toolkit ever actually shipped/managed in this repo — a path that only
+                # matches the boundary glob without ever being in `lock["files"]` is not the
+                # toolkit's concern (reqQuestFramework#14). `lock` reaching this point is
+                # already known to be a JSON object (`cmd_upgrade` loaded it via
+                # `load_toolkit_lock(strict=True)` above), but its `files` field could still
+                # be malformed by hand — `_lock_ever_shipped()` treats that as "no history"
+                # instead of crashing on `.keys()`.
+                ever_shipped = _lock_ever_shipped(lock)
+                plan = _compute_align_plan(new_root, ROOT, keep_set, globs=align_globs,
+                                            ever_shipped=ever_shipped)
                 result = _apply_align_plan(plan, ROOT, dry_run=parsed.dry_run)
                 # Same fix as `adopt --align`'s KEEP handling (reqQuestFramework#5 review):
                 # record the RELEASE's hash for a kept path, not the (untouched-by-definition)
