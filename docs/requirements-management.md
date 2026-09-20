@@ -20,7 +20,7 @@ Of all the CPRE Foundation Level practices, requirements management has the stro
 
 | IREB practice | reqQuest Framework mechanism | Proof of compliance | What breaks without it |
 |---|---|---|---|
-| **Life Cycle Management** | The `status` field in every artifact's front matter (`draft` / `review` / `accepted` / `deprecated`), changed by a commit | `git log --follow -- <file>` shows the full history of state transitions | No one knows whether a given document is in effect, historical, or abandoned mid-draft |
+| **Life Cycle Management** | The `status` field in every artifact's front matter (`draft` / `review` / `approved` / `deprecated`), changed by a commit | `git log --follow -- <file>` shows the full history of state transitions | No one knows whether a given document is in effect, historical, or abandoned mid-draft |
 | **Version Control** | The commit history of a requirement file — every change is a new version with an author, timestamp, and message | `git log -p -- <file>` reconstructs any earlier version and the reason for the change | A requirement is silently overwritten; it is impossible to reconstruct what was in effect at the moment a design decision was made |
 | **Configurations & Baselines** | Configuration = a branch (a consistent set of files in progress, mutable); baseline = a git tag/release (a frozen, named point in history). **A baseline is never edited retroactively** — every change to the agreed content after it is established creates a new tag, never overwrites the old one (the "Unchangeability" property of a configuration) | `git tag` + `git show <tag>:<file>` reconstructs the exact, undisputable state of the requirements used for a specific decision (e.g. a quote, a release) | There is no reference point to compare "what we agreed" against "what exists today" — every conversation about a discrepancy becomes a reconstruction from memory; an editable baseline stops serving as a reliable reference point for business decisions |
 | **Attributes & Views** | Front-matter fields (`owner`, `status`, `tags`, `priority`, `id`) as attributes; filtering/grouping by these fields (e.g. in a script or a tool) as views | A front-matter query (grep/script) returns exactly the requirements meeting the criterion — without manual review | Every question like "which requirements are critical and unreviewed" requires manually searching the entire set |
@@ -28,16 +28,16 @@ Of all the CPRE Foundation Level practices, requirements management has the stro
 | **Handling Change** | A change request = an Issue or branch; acceptance decision = a merged Pull Request with review history | A merged PR is a durable, signed (author + reviewer) record of the change decision | A requirement change happens outside the system (a conversation, an email) and never makes it back to the source of truth |
 | **Prioritization** | Prioritization of **requirements** (not tasks/issues — task backlog management is out of scope for this methodology, see the vision and principles document, principle 4) via a `priority` field in the requirement file's front matter, informed by Kano classification (see the problem-to-requirement guide) | A query on the `priority` field (grep/script) returns a sorted, auditable list of requirements by priority | Priorities live in one person's head and change without a trace when that person is unavailable |
 
-## Artifact life cycle — draft/accepted, not SPIKE
+## Artifact life cycle — draft/approved, not SPIKE
 
 ```mermaid
 stateDiagram-v2
     [*] --> draft: new file/branch
     draft --> review: Pull Request opened
     review --> draft: changes requested
-    review --> accepted: PR approved and merged
-    accepted --> review: change request (new PR)
-    accepted --> deprecated: superseded/outdated
+    review --> approved: PR approved and merged
+    approved --> review: change request (new PR)
+    approved --> deprecated: superseded/outdated
     deprecated --> [*]
 
     note right of review
@@ -48,7 +48,7 @@ stateDiagram-v2
     end note
 ```
 
-**Reading the diagram:** the only transition that grants the `accepted` status the authority of a requirements source passes through the `review` node — there is no shortcut straight from `draft` to `accepted`. This is exactly where the reqQuest Framework rejects the idea of a separate "prototype"/"SPIKE" state (see [`artifacts-and-structure.md`](artifacts-and-structure.md)): experimentation happens in `draft`, on a branch, without creating a third, parallel status.
+**Reading the diagram:** the only transition that grants the `approved` status the authority of a requirements source passes through the `review` node — there is no shortcut straight from `draft` to `approved`. This is exactly where the reqQuest Framework rejects the idea of a separate "prototype"/"SPIKE" state (see [`artifacts-and-structure.md`](artifacts-and-structure.md)): experimentation happens in `draft`, on a branch, without creating a third, parallel status.
 
 ## Configurations and baselines — how a branch differs from a tag
 
@@ -60,7 +60,7 @@ gitGraph
     commit id: "draft REQ-042"
     commit id: "edits after review"
     checkout main
-    merge feature/new-requirements id: "REQ-042 accepted"
+    merge feature/new-requirements id: "REQ-042 approved"
     commit id: "baseline v1.1" tag: "v1.1"
     branch feature/scope-change
     checkout feature/scope-change

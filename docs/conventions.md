@@ -22,7 +22,7 @@ Minimal set of fields, implementing the "Attributes" and "Work Products" practic
 ---
 title: <readable title>
 owner: <responsible role or person>
-status: draft | review | accepted | deprecated
+status: draft | review | approved | deprecated
 last_updated: <YYYY-MM-DD>
 tags: [<keywords for filtering>]
 ---
@@ -63,8 +63,10 @@ Implementation of the "Life Cycle Management" practice. Recommended minimal set:
 |---|---|---|
 | `draft` | Being created, not yet reviewed | Work product before validation |
 | `review` | Submitted for approval (open PR) | Undergoing validation |
-| `accepted` / `active` | Approved, in effect | Baseline |
+| `approved` / `active` | Approved, in effect | Baseline |
 | `deprecated` | Superseded or outdated, historical entry | Outside active scope, but still traceable |
+
+> **Note:** `accepted` was the canonical value up to toolkit 1.2.x. It remains a deprecated alias of `approved`: the validator accepts it with a warning (exit code unchanged) and it will be removed in the next major version. Reason for the change: in IREB terminology *acceptance* means assessing whether a system satisfies its requirements, not signing off the requirement itself; `approved` corresponds to entering a baseline.
 
 ## 4. Traceability convention
 

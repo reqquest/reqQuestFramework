@@ -37,7 +37,7 @@ Every requirement file starts with a YAML front-matter block — full field desc
 id: FR-DEMO-001
 title: <readable title>
 type: FR
-status: draft | review | accepted | deprecated
+status: draft | review | approved | deprecated
 owner: <responsible role or person>
 version: "1.0"
 last_updated: <YYYY-MM-DD>
