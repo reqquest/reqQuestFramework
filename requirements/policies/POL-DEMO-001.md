@@ -2,7 +2,7 @@
 id: POL-DEMO-001
 title: Approving long bookings
 type: POL
-status: accepted
+status: approved
 owner: Office administrator
 version: "1.0"
 last_updated: 2026-08-16

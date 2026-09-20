@@ -2,7 +2,7 @@
 id: ADR-DEMO-001
 title: Locking mechanism for concurrent booking
 type: ADR
-status: accepted
+status: approved
 owner: Architect
 version: "1.0"
 last_updated: 2026-08-16

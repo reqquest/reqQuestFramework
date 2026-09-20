@@ -2,7 +2,7 @@
 id: NFR-DEMO-001
 title: Room list load time
 type: NFR
-status: accepted
+status: approved
 owner: Tech Lead
 version: "1.0"
 last_updated: 2026-08-16

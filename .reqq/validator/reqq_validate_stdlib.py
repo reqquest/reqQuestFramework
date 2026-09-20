@@ -232,13 +232,17 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 # --- Constants ---------------------------------------------------------------
 ID_PATTERN = r"^(BR|FR|NFR|ADR|TC|POL)-[A-Z0-9]{2,10}-[0-9]{3}$"
-STATUS_ENUM = {"draft", "review", "accepted", "deprecated"}
+STATUS_ENUM = {"draft", "review", "approved", "deprecated"}
+# Deprecated spellings that still validate, with a warning (reqQuestFramework#16). `accepted` was the
+# canonical value up to toolkit 1.2.x; it collides with IREB's *acceptance* (assessing a system), so
+# `approved` is canonical now. Remove the alias in the next major version.
+STATUS_ALIASES = {"accepted": "approved"}
 TYPE_ENUM   = {"BR", "FR", "NFR", "ADR", "TC", "POL"}
 
 HINTS = {
     "id":         f"ID must match `{ID_PATTERN}` e.g. FR-DEMO-001, NFR-PERF-003.",
     "type":       "Allowed types: BR, FR, NFR, ADR, TC, POL.",
-    "status":     "Allowed statuses: draft, review, accepted, deprecated (lowercase).",
+    "status":     "Allowed statuses: draft, review, approved, deprecated (lowercase).",
     "owner":      "Owner is a role or person accountable for this artifact.",
     "last_updated": 'Use ISO date "YYYY-MM-DD".',
     "traces_to":  "FR/NFR should have `traces_to: [BR-*, ...]` pointing at the requirement(s) they realize.",
@@ -541,7 +545,12 @@ def validate_doc(f: Path, require_full_traceability: bool) -> List[Dict[str, Any
 
     # Status enum
     status = fm.get("status", "")
-    if status and str(status) not in STATUS_ENUM:
+    if status and str(status) in STATUS_ALIASES:
+        canonical = STATUS_ALIASES[str(status)]
+        out.append(_rec(f, "warning", "schema", "status",
+                        f"'{status}' is a deprecated alias of '{canonical}'.",
+                        f"Use `status: {canonical}`; the alias will be removed in the next major toolkit version."))
+    elif status and str(status) not in STATUS_ENUM:
         out.append(_rec(f, "error", "schema", "status",
                         f"'{status}' is not valid. Allowed: {', '.join(sorted(STATUS_ENUM))}",
                         HINTS["status"]))
@@ -2334,7 +2343,10 @@ def enforce_min_toolkit_version() -> None:
 
 # --- Output ------------------------------------------------------------------
 def print_results(results: List[Dict[str, Any]], scanned: int, excluded: List[str]):
-    print(f"reqq validate — files scanned: {scanned}, errors: {len(results)}")
+    n_err = sum(1 for r in results if r["severity"] == "error")
+    n_warn = len(results) - n_err
+    warn_part = f", warnings: {n_warn}" if n_warn else ""
+    print(f"reqq validate — files scanned: {scanned}, errors: {n_err}{warn_part}")
     if excluded:
         print(f"excluded: {', '.join(excluded)}")
 
@@ -2350,8 +2362,11 @@ def print_results(results: List[Dict[str, Any]], scanned: int, excluded: List[st
             if it.get("hint"):
                 print(f"     ↳ hint: {it['hint']}")
 
-    if results:
-        print(f"\nSummary: {len(results)} error(s) • scanned {scanned} file(s)")
+    if n_err:
+        warn_note = f", {n_warn} warning(s)" if n_warn else ""
+        print(f"\nSummary: {n_err} error(s){warn_note} • scanned {scanned} file(s)")
+    elif n_warn:
+        print(f"\nValidated {scanned} file(s) with {n_warn} warning(s). ⚠")
     else:
         print(f"\nValidated {scanned} file(s). ✅")
 
@@ -2424,18 +2439,21 @@ def main() -> int:
         results.extend(validate_doc(f, cfg.get("require_full_traceability", True)))
 
     # Output
+    errors = [r for r in results if r["severity"] == "error"]
+    warnings = [r for r in results if r["severity"] != "error"]
     if args.format == "json":
         payload = {
-            "ok":       not bool(results),
+            "ok":       not errors,
             "scanned":  len(files),
-            "errors":   results,
+            "errors":   errors,
+            "warnings": warnings,
             "excluded": excluded,
         }
         print(json.dumps(payload, indent=2))
     else:
         print_results(results, scanned=len(files), excluded=excluded)
 
-    return 0 if not results else 2
+    return 0 if not errors else 2
 
 
 if __name__ == "__main__":

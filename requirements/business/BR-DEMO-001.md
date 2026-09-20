@@ -2,7 +2,7 @@
 id: BR-DEMO-001
 title: Self-service meeting room booking
 type: BR
-status: accepted
+status: approved
 owner: Product Owner
 version: "1.0"
 last_updated: 2026-08-16

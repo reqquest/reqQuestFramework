@@ -2,7 +2,7 @@
 id: FR-DEMO-001
 title: Book a room for a time slot
 type: FR
-status: accepted
+status: approved
 owner: Tech Lead
 version: "1.0"
 last_updated: 2026-08-16

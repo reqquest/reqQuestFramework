@@ -2,7 +2,7 @@
 id: TC-DEMO-001
 title: Reject a conflicting room booking
 type: TC
-status: accepted
+status: approved
 owner: Tech Lead
 version: "1.0"
 last_updated: 2026-08-16
