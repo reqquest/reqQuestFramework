@@ -30,10 +30,10 @@ to canon, or a deliberate `local_overrides` entry for a difference that is meant
 
 ---
 
-## [toolkit-v1.2.3]() (2026-09-15)
+## [toolkit-v1.3.0]() (2026-09-20)
 
-### Fixed
+### Added
 
-* fix(toolkit): reqqf#14 — LOCAL_ONLY requires toolkit.lock history, not just a glob match (#15) - mkarwasz-reqquest-dev
+* feat(toolkit): reqqf#16 — &quot;approved&quot; as canonical requirement status, &quot;accepted&quot; as deprecated alias (#17) - mkarwasz-reqquest-dev
 
 
