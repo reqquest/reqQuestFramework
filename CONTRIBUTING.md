@@ -25,9 +25,17 @@ Open a GitHub Issue describing the problem or proposal. For bugs, include steps 
 
 6. Open a pull request against `main` describing the change and its motivation.
 
-## Contributor agreement
+## Developer Certificate of Origin
 
-<!-- DECISION PENDING: CLA vs DCO (REQQF#48, step 0) -->
+Contributions are accepted under the [Developer Certificate of Origin 1.1](https://developercertificate.org/) (DCO). By signing off a commit, you certify that you wrote the change or otherwise have the right to submit it under this project's license (Apache-2.0).
+
+Sign off every commit with `git commit -s`. This adds a line like the following to the commit message:
+
+```text
+Signed-off-by: Jane Doe <jane.doe@example.com>
+```
+
+The name and email must match the commit author. A pull request with commits that are not signed off fails the DCO check.
 
 ## Code of Conduct
 
