@@ -4,6 +4,4 @@ This project adopts the [Contributor Covenant](https://www.contributor-covenant.
 
 ## Reporting
 
-To report a violation, contact **kontakt@reqquest.dev**.
-
-<!-- CONFIRM: is kontakt@reqquest.dev the right contact for Code of Conduct reports? (REQQF#48, step 0) -->
+To report a violation, contact **info@reqquest.dev**.
