@@ -1,17 +1,21 @@
-require_full_traceability: true
-exclude_globs:
-  - "requirements/README.md"
-  - "requirements/**/README.md"
-  - "requirements/00-context/**"
-  - ".reqq/toolkit.lock"
+# Validator configuration of this repository, the first adopter of the toolkit.
+# It is the template config.example.yaml with the keys below; the examples in requirements/
+# carry the prefix REQQF and a short title in the file name.
 
-# Toolkit versioning (ADR-TOOLKIT-001 D5). Remove this block to disable the CI check
-# entirely — `check --ci` then exits 0 without doing anything.
-# The stdlib YAML parser does not strip inline comments — keep them on their own line.
+language: en
+id_prefix: REQQF
+short_title: true
+enforce_layout: true
+require_full_traceability: true
+exclude_globs: []
+
+# Markdown link check: requirements/ and the methodology in docs/.
+link_check_paths:
+  - requirements
+  - docs
+
+# Toolkit versioning: the check of the local files against .reqq/toolkit.lock.
 toolkit:
-  # stable | next
   update_channel: stable
-  # off | notify | pr (reqquest/reqQuestFramework#6; manual/ci-notify/ci-pr are deprecated aliases)
   update_check: notify
-  # github | gitlab (gitlab not yet implemented)
   host: github

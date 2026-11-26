@@ -3,16 +3,16 @@ name: requirements (toolkit update)
 # Acts on an available toolkit release instead of just annotating it (reqquest/reqQuestFramework#6).
 # `requirements-toolkit-check.yml` already tells a green CI run "there's a newer version" via
 # `::warning::`, but nobody reads the log of a green run — this workflow gives that signal a
-# durable home, per the level configured in `toolkit.update_check` (ADR-TOOLKIT-001 D5):
+# durable home, per the level configured in `toolkit.update_check` (REQQF-ADR-TOOLKIT-100 D5):
 #   notify — open/update a tracking issue, close it once .reqq/toolkit.lock catches up
 #   pr     — run `upgrade` and open/update a draft-or-ready PR with the result
 # `off` (and any unrecognised value) does nothing. Runs only on its own schedule and
 # on-demand — never on push/pull_request, so it can never turn an adopter's unrelated
 # commit red (same isolation requirements-toolkit-check.yml relies on per #4).
 #
-# Mutation (issues/PRs) lives here in `gh` CLI, not in reqq_validate_stdlib.py, matching
-# release.yml / republish-toolkit.yml / gemini-review.yml — the validator stays
-# read-only/stdlib-only and only grows a facts query (`check --format json`).
+# Mutation (issues/PRs) lives here in `gh` CLI, not in reqq_validate.py, matching
+# release.yml — the validator stays read-only and only grows a facts query
+# (`check --format json`).
 # GitHub-only: both jobs use `gh`/GitHub Actions constructs, so this workflow only ever
 # runs for a GitHub-hosted adopter. `toolkit.host` (github | gitlab) is declared in
 # config.yaml for a future adapter, but nothing here branches on it yet.
@@ -42,14 +42,28 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+
+      - name: Install validator dependencies
+        run: python -m pip install -r .reqq/validator/requirements.txt
 
       - name: Resolve toolkit update state
         id: state
         run: |
           CHECK_JSON="$RUNNER_TEMP/toolkit-check.json"
-          python3 .reqq/validator/reqq_validate_stdlib.py check --format json > "$CHECK_JSON" || true
+          RC=0
+          python3 .reqq/validator/reqq_validate.py check --format json > "$CHECK_JSON" || RC=$?
           cat "$CHECK_JSON"
+          # A validator that dies before printing (e.g. a malformed config.yaml) leaves no JSON;
+          # without this the outputs stay empty and every later step is skipped, green.
+          if ! jq -e 'type == "object"' "$CHECK_JSON" >/dev/null 2>&1; then
+            echo "::error::check --format json exited $RC without a JSON result"
+            exit 1
+          fi
           if jq -e '.error' "$CHECK_JSON" >/dev/null 2>&1; then
             echo "::notice::check --format json returned an error, nothing to act on: $(jq -r '.error.message' "$CHECK_JSON")"
             echo "mode=off" >> "$GITHUB_OUTPUT"
@@ -130,17 +144,31 @@ jobs:
         run: |
           echo "base=$(gh api "repos/${{ github.repository }}" --jq .default_branch)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ steps.repo.outputs.base }}
           token: ${{ secrets.TOOLKIT_UPDATE_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+
+      - name: Install validator dependencies
+        run: python -m pip install -r .reqq/validator/requirements.txt
 
       - name: Resolve toolkit update state
         id: state
         run: |
           CHECK_JSON="$RUNNER_TEMP/toolkit-check.json"
-          python3 .reqq/validator/reqq_validate_stdlib.py check --format json > "$CHECK_JSON" || true
+          RC=0
+          python3 .reqq/validator/reqq_validate.py check --format json > "$CHECK_JSON" || RC=$?
           cat "$CHECK_JSON"
+          # A validator that dies before printing (e.g. a malformed config.yaml) leaves no JSON;
+          # without this the outputs stay empty and every later step is skipped, green.
+          if ! jq -e 'type == "object"' "$CHECK_JSON" >/dev/null 2>&1; then
+            echo "::error::check --format json exited $RC without a JSON result"
+            exit 1
+          fi
           if jq -e '.error' "$CHECK_JSON" >/dev/null 2>&1; then
             echo "::notice::check --format json returned an error, nothing to act on: $(jq -r '.error.message' "$CHECK_JSON")"
             echo "mode=off" >> "$GITHUB_OUTPUT"
@@ -167,10 +195,17 @@ jobs:
           EXPECTED_SHA=""
           if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
             EXPECTED_SHA=$(git ls-remote --heads origin "$BRANCH" | cut -f1)
-            git fetch origin "$BRANCH"
-            LAST_AUTHOR=$(git log -1 --format=%an FETCH_HEAD)
-            if [ "$LAST_AUTHOR" != "github-actions[bot]" ]; then
-              echo "::notice::$BRANCH has commits from $LAST_AUTHOR — a human is already on it, skipping"
+            # Every commit of the branch that is not on the base must be the bot's: a human
+            # commit anywhere below a later bot commit would be lost by the force-push.
+            # --shallow-exclude fetches just those commits into this shallow checkout.
+            if ! git fetch -q --shallow-exclude="${{ steps.repo.outputs.base }}" origin "$BRANCH"; then
+              echo "::notice::$BRANCH has no commits of its own beyond ${{ steps.repo.outputs.base }} or cannot be read, skipping"
+              echo "safe=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            OTHERS=$(git log --format=%an FETCH_HEAD --not HEAD | awk '$0 != "github-actions[bot]"' | sort -u | paste -sd, -)
+            if [ -n "$OTHERS" ]; then
+              echo "::notice::$BRANCH has commits from $OTHERS — a human is already on it, skipping"
               echo "safe=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
@@ -184,12 +219,13 @@ jobs:
         run: |
           git checkout -B "${{ steps.branch.outputs.name }}"
           # Preserve a known-good copy of the validator before it can be touched by the
-          # upgrade below — reqq_validate_stdlib.py is itself in the toolkit boundary, so a
+          # upgrade below — the validator modules are themselves in the toolkit boundary, so a
           # conflicting local override can leave merge markers in the working tree's copy,
           # and the PR-body step must not import that.
-          cp .reqq/validator/reqq_validate_stdlib.py "$RUNNER_TEMP/pristine_reqq_validate_stdlib.py"
+          mkdir "$RUNNER_TEMP/pristine_validator"
+          cp .reqq/validator/reqq_*.py "$RUNNER_TEMP/pristine_validator/"
           RC=0
-          python3 .reqq/validator/reqq_validate_stdlib.py upgrade \
+          python3 .reqq/validator/reqq_validate.py upgrade \
             --version "${{ steps.state.outputs.latest_version }}" --format json > "$RUNNER_TEMP/toolkit-upgrade.json" || RC=$?
           cat "$RUNNER_TEMP/toolkit-upgrade.json"
           # exit 2 ("applied but needs a human" — conflicts, overwritten changes, collisions,
@@ -201,6 +237,7 @@ jobs:
           fi
           echo "needs_attention=$(jq -r '.needs_attention' "$RUNNER_TEMP/toolkit-upgrade.json")" >> "$GITHUB_OUTPUT"
           echo "already_up_to_date=$(jq -r '.already_up_to_date' "$RUNNER_TEMP/toolkit-upgrade.json")" >> "$GITHUB_OUTPUT"
+          echo "major=$(jq -r '.major' "$RUNNER_TEMP/toolkit-upgrade.json")" >> "$GITHUB_OUTPUT"
 
       - name: Commit and push
         if: steps.state.outputs.mode == 'pr' && steps.state.outputs.has_update == 'true' && steps.branch.outputs.safe == 'true' && steps.upgrade.outputs.already_up_to_date == 'false'
@@ -223,20 +260,19 @@ jobs:
         env:
           UPGRADE_JSON: ${{ runner.temp }}/toolkit-upgrade.json
           BODY_MD: ${{ runner.temp }}/toolkit-pr-body.md
-          PRISTINE_VALIDATOR: ${{ runner.temp }}/pristine_reqq_validate_stdlib.py
+          PRISTINE_VALIDATOR: ${{ runner.temp }}/pristine_validator
         run: |
           python3 - <<'PY'
-          import importlib.util
-          import json, os
+          import json, os, sys
 
-          # Load the pre-upgrade copy saved by the previous step, never the working tree's
-          # post-upgrade one — that file is itself in the toolkit boundary, so a conflicting
-          # local override can leave merge markers in it, and importing that would raise
-          # SyntaxError here instead of letting the (expected, exit-2) draft PR get opened.
-          spec = importlib.util.spec_from_file_location(
-              "reqq_validate_stdlib", os.environ["PRISTINE_VALIDATOR"])
-          V = importlib.util.module_from_spec(spec)
-          spec.loader.exec_module(V)
+          # Import the pre-upgrade copy saved by the previous step, never the working tree's
+          # post-upgrade one — those files are themselves in the toolkit boundary, so a
+          # conflicting local override can leave merge markers in them, and importing that
+          # would raise SyntaxError here instead of letting the (expected, exit-2) draft PR
+          # get opened.
+          sys.path.insert(0, os.environ["PRISTINE_VALIDATOR"])
+          import reqq_toolkit_align as AL
+          import reqq_toolkit_upgrade as UP
 
           doc = json.load(open(os.environ["UPGRADE_JSON"]))
           is_fallback = doc.get("mode") == "full_alignment_fallback"
@@ -252,6 +288,23 @@ jobs:
                   f"v{doc['to_version']} instead of a 3-way merge."
               )
               lines.append("")
+          if doc["major"]:
+              # ADR D7: a MAJOR upgrade breaks the contract, so the PR leads with migration.
+              source = doc["source"].rstrip("/").removesuffix(".git")
+              release = (f"[release page of v{doc['to_version']}]"
+                         f"({source}/releases/tag/toolkit-v{doc['to_version']})")
+              # Real notes start with a version heading; a stand-in in parentheses says they
+              # could not be read.
+              has_notes = (doc.get("changelog_delta") or "").startswith("### v")
+              notes = f"the CHANGELOG section below or the {release}" if has_notes else f"the {release}"
+              lines += [
+                  "## Migration",
+                  "",
+                  f"⚠ **MAJOR upgrade** (v{doc['from_version']} → v{doc['to_version']}): it "
+                  "breaks backward compatibility — do not merge it unreviewed. Follow the "
+                  f"migration notes in {notes} before merging.",
+                  "",
+              ]
           by_action = {}
           for f in doc["files"]:
               by_action.setdefault(f["action"], []).append(f["path"])
@@ -259,7 +312,7 @@ jobs:
           # COLLISION, no conflicts/merge_failed/overwritten_changes/removal_blocked keys) —
           # reading it with the normal-upgrade labels/keys below would KeyError or silently
           # print nothing (reqQuestFramework#8 review).
-          labels = V._ALIGN_ACTION_LABELS if is_fallback else V._UPGRADE_STATE_LABELS
+          labels = AL._ALIGN_ACTION_LABELS if is_fallback else UP._UPGRADE_STATE_LABELS
           for action, label in labels:
               paths = by_action.get(action)
               if not paths:
@@ -286,6 +339,12 @@ jobs:
                   f"{s['overwritten_changes']} · Merge failed: {s['merge_failed']} · "
                   f"Collisions: {s['collisions']} · Removal blocked: {s['removal_blocked']}"
               )
+              if doc.get("lock_written") is False:
+                  lines.append("")
+                  lines.append(
+                      "**`.reqq/toolkit.lock` NOT written** — a release path is blocked by a "
+                      "local directory, a file above it or a symlink; resolve it and re-run the upgrade."
+                  )
           lines += ["", "## CHANGELOG", "", doc.get("changelog_delta") or "(no changelog delta)", ""]
           lines.append(
               "_Opened/updated automatically by `requirements-toolkit-update.yml`. Marked as a "
@@ -322,6 +381,17 @@ jobs:
             elif [ "$NEEDS_ATTENTION" != "true" ] && [ "$IS_DRAFT" = "true" ]; then
               gh pr ready "$EXISTING"
             fi
+            PR="$EXISTING"
           else
-            gh pr create --base "$BASE" --head "$BRANCH" --title "$TITLE" --body-file "$BODY_MD" $DRAFT_FLAG
+            PR=$(gh pr create --base "$BASE" --head "$BRANCH" --title "$TITLE" --body-file "$BODY_MD" $DRAFT_FLAG)
+          fi
+          # The `breaking` label comes last and never fails the step: it is a signal on top of
+          # the migration section, and the PR is complete without it.
+          # Label names are case-insensitive on GitHub: an adopter's own `Breaking` is used as it is.
+          if [ "${{ steps.upgrade.outputs.major }}" = "true" ]; then
+            LABEL=$(gh label list --limit 1000 --json name -q '.[].name' | grep -ixFm1 breaking || true)
+            { [ -n "$LABEL" ] || { LABEL=breaking && gh label create breaking --color b60205 \
+                --description "Breaking change: MAJOR toolkit upgrade"; }; } \
+              && gh pr edit "$PR" --add-label "$LABEL" \
+              || echo "::warning::cannot add the breaking label to the PR"
           fi

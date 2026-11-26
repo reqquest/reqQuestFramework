@@ -1,23 +1,19 @@
-# Objectives and Scope — business rationale document
+# Objectives and scope — business case document
 
-> This file follows the pattern described in [`../../docs/conventions.md`](../../docs/conventions.md), section 7 ("Business rationale document"). The content below is an **example** (fictional domain: meeting room booking system) — replace it with your own project's real content, keeping the three sections below.
+> This file implements the pattern described in [`conventions.md`](https://github.com/reqquest/reqQuestFramework/blob/main/docs/framework/conventions.md), section 7 ("Business case document"). The content below is an **example** (fictional domain: a meeting-room booking system) — replace it with the real content of your project and keep the three sections below.
+>
+> **Direction of dependencies:** this document sits above the requirements and ADRs. Requirements and ADRs refer to it, and it does not refer to them. Add a new high-level topic here first, then carry its consequences into ADRs, NFRs and FRs.
 
-## Objective and business rationale
+## Objective and business case
 
-Employees today book meeting rooms by messaging the front desk, which causes delays and double bookings. The project's objective is a self-service room booking system available to every employee, removing the front-desk intermediary and eliminating double bookings. All requirements in this repository relate to this objective — see [`BR-DEMO-001`](../business/BR-DEMO-001.md) as the top-level business requirement.
+Today employees book meeting rooms by sending messages to reception, which causes delays and double bookings. The project's objective is a self-service room booking system, available to every employee, that removes reception as an intermediary and eliminates double bookings. All requirements in this repository relate to this objective.
 
-## Adopted combination of process facets (see [`../../docs/process-and-working-modes.md`](../../docs/process-and-working-modes.md))
+## Chosen combination of process facets (see [`process-and-working-modes.md`](https://github.com/reqquest/reqQuestFramework/blob/main/docs/framework/process-and-working-modes.md))
 
-- **Time:** Iterative — scope emerges as work progresses, functional categories added in separate PRs.
-- **Purpose:** Explorative until the first production release, then switched to Prescriptive for the scope covered by an SLA.
-- **Business purpose:** Customer-specific — the repository is maintained for a single, internal customer (the company's IT department).
+- **Time:** Iterative — the scope emerges as work progresses; further functional categories are added in separate PRs.
+- **Purpose:** Explorative until the first production release, then a switch to Prescriptive for the scope covered by the SLA.
+- **Business goal:** Customer-specific — the repository is run for one internal customer (the company's IT department).
 
 ## Role catalog
 
-Extends the minimal catalog from the methodology documentation (scope and roles) (human as author/reviewer, AI agent under human supervision) with roles specific to this project's domain:
-
-| Role | Responsibility | Reviews |
-|---|---|---|
-| Product Owner | Prioritization, acceptance of business requirements | `requirements/business/**` |
-| Tech Lead | Technical feasibility, architectural consistency | `requirements/functional/**`, `requirements/nonfunctional/**` |
-| Architect | Design decisions and their consequences | `requirements/adrs/**` |
+The project's roles, the requirements areas they are responsible for and their `handle` on the host are recorded in the role catalog `roles.yaml`, the only source of roles in the repository; it is created as a copy of the example [`roles.example.yaml`](roles.example.yaml). Who holds which role is shown in the "Role" column of [`stakeholders.md`](stakeholders.md). The catalog extends the minimal role catalog from [`_index.md`](https://github.com/reqquest/reqQuestFramework/blob/main/docs/framework/_index.md#scope-and-roles).

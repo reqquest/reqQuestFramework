@@ -7,7 +7,7 @@
 #
 # Placeholder handles — replace with your own before use.
 # Validates against .reqq/schema/roles.schema.json (draft-07).
-# Map form only — see ADR-GOV-001.
+# Map form only: `roles` maps each role key to its role.
 
 version: "0.1"
 
@@ -19,4 +19,3 @@ roles:
       - "@bob"
     responsible_for:
       - "*"
-    min_permission: write

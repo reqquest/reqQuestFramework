@@ -1,0 +1,31 @@
+# roles.example.yaml — example role catalog for the fictional
+# room-booking domain. To use ownership governance, copy it to roles.yaml in this folder
+# and replace the roles and handles with yours; reqq_owners.py reads roles.yaml only and
+# validates it against .reqq/schema/roles.schema.json.
+# `owner` in every requirement is a role key from here (rule V1), and the last column of
+# stakeholders.md assigns each role to a stakeholder (rule V8).
+# `responsible_for` is relative to requirements/; "*" is the whole tree.
+
+version: "0.1"
+
+roles:
+  role-product-owner:
+    title: "Product Owner"
+    handle: "@example-org/product-owners"
+    responsible_for:
+      - "business"
+      - "policies"
+
+  role-tech-lead:
+    title: "Tech Lead"
+    handle: "@example-org/tech-leads"
+    responsible_for:
+      - "functional"
+      - "nonfunctional"
+      - "testcases"
+
+  role-architect:
+    title: "Architekt"
+    handle: "@example-org/architects"
+    responsible_for:
+      - "adrs"

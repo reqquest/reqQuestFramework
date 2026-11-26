@@ -3,16 +3,14 @@
 # For repos whose `owner:` distribution is already path-shaped
 # (e.g. a business-analysis role owns business/, an authoring role owns
 # functional/ + adrs/).
+# `responsible_for` paths are relative to requirements/ (`business`, not
+# `requirements/business`); "*" is the whole tree.
 # `responsible_for` sets must not overlap — on GitHub the last matching
 # pattern wins and one role would silently lose authority (rule V5).
 #
 # Placeholder handles — replace with your own before use.
 # Validates against .reqq/schema/roles.schema.json (draft-07).
-# Map form only — see ADR-GOV-001.
-#
-# NOTE: no inline comments after a value below. The stdlib parser
-# (_parse_simple_yaml) does not strip trailing `# ...` from a scalar,
-# so `key: 2  # note` would parse as the string "2  # note".
+# Map form only: `roles` maps each role key to its role.
 
 version: "0.1"
 
@@ -21,8 +19,7 @@ roles:
     title: "Business Owner"
     handle: "@alice.smith"
     responsible_for:
-      - "requirements/business"
-    min_permission: write
+      - "business"
     # GitLab renders this as section [Business Owner][2]; GitHub ignores it with a warning.
     min_approvals: 2
 
@@ -30,9 +27,8 @@ roles:
     title: "Tech Lead"
     handle: "@bob"
     responsible_for:
-      - "requirements/functional"
-      - "requirements/nonfunctional"
-    min_permission: write
+      - "functional"
+      - "nonfunctional"
 
   role-architect:
     title: "Architect"
@@ -40,5 +36,4 @@ roles:
       - "@alice.smith"
       - "@org/architecture"
     responsible_for:
-      - "requirements/adrs"
-    min_permission: maintain
+      - "adrs"

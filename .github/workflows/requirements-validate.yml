@@ -20,7 +20,22 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+
+      - name: Install validator dependencies
+        run: python -m pip install -r .reqq/validator/requirements.txt
 
       - name: Validate requirements
-        run: python3 .reqq/validator/reqq_validate_stdlib.py --all
+        run: python3 .reqq/validator/reqq_validate.py --all
+
+      - name: Verify code owners on the host
+        # Rule V6 at ownership.mode enforce: the branch requires review from code owners and
+        # every handle can approve. Below enforce no request is made and no token is needed.
+        # OWNERS_VERIFY_TOKEN (Administration: read, Contents: read) is needed only for classic branch protection.
+        run: python3 .reqq/validator/reqq_validate.py --check owners-host
+        env:
+          GITHUB_TOKEN: ${{ secrets.OWNERS_VERIFY_TOKEN || secrets.GITHUB_TOKEN }}

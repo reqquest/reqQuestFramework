@@ -1,24 +1,59 @@
 {
   "manifest_version": 1,
   "toolkit": "reqquest-framework",
-  "description": "Canonical path boundary of the reqQuest Framework toolkit (ADR-TOOLKIT-001 D1). The GitHub Release asset `raac-toolkit-<version>.tar.gz` attached to every `toolkit-v<version>` tag contains exactly the files matched by `boundary` and not by `exclude`, packed under a single top-level `raac-toolkit-<version>/` directory. `.reqq/validator/reqq_validate_stdlib.py` reads this same file to compute the hashes it records in `.reqq/toolkit.lock`. The boundary must stay self-sufficient: whatever the shipped validator and the shipped CI workflow need in order to run green on a fresh extract has to be inside it.",
+  "description": "Canonical path boundary of the reqQuest Framework toolkit. The GitHub Release asset `raac-toolkit-<version>.tar.gz` attached to every `toolkit-v<version>` tag contains exactly the files matched by `boundary` or `seed` and not by `exclude`, packed under a single top-level `raac-toolkit-<version>/` directory. `.reqq/validator/reqq_validate.py` reads this same file to compute the hashes it records in `.reqq/toolkit.lock`. The boundary must stay self-sufficient: whatever the shipped validator and the shipped CI workflow need in order to run green on a fresh extract has to be inside it, except the libraries listed in `.reqq/validator/requirements.txt`, which the shipped workflow installs with pip. `seed` lists starting templates the adopter owns from the first install on: they ship in the asset, but are never hashed into `.reqq/toolkit.lock` and `upgrade` never adds, replaces or removes them. A path may not match both `boundary` and `seed`. `public` defines what the internal repository of the framework publishes to the public repository; it has no meaning for adopters.",
   "source": "https://github.com/reqquest/reqQuestFramework",
   "tag_prefix": "toolkit-v",
   "asset_template": "raac-toolkit-{version}.tar.gz",
   "boundary": [
     "toolkit-manifest.json",
+    "LICENSES/Apache-2.0.txt",
+    "LICENSES/NOTICE-reqQuest-Framework.txt",
     ".reqqignore",
     ".reqq/schema/**/*",
     ".reqq/validator/*.py",
     ".reqq/validator/config.example.yaml",
+    ".reqq/validator/requirements.txt",
     ".reqq/hooks/**/*",
     ".github/workflows/requirements-*.yml",
     "requirements/README.md",
-    "requirements/**/README.md",
-    "requirements/00-context/**/*"
+    "requirements/AGENTS.md",
+    "requirements/CLAUDE.md",
+    "requirements/adrs/README.md",
+    "requirements/00-context/glossary.md"
+  ],
+  "seed": [
+    "requirements/AGENTS.project.md",
+    "requirements/00-context/glossary.project.md",
+    "requirements/00-context/objectives-and-scope.md",
+    "requirements/00-context/stakeholders.md",
+    "requirements/00-context/roles.example.yaml",
+    "requirements/business/REQQF-BR-BOOKING-001-self-service-booking.md",
+    "requirements/functional/BOOKING/REQQF-FR-BOOKING-001-room-booking.md",
+    "requirements/functional/BOOKING/REQQF-FR-BOOKING-002-booking-api.md",
+    "requirements/functional/AUTH/REQQF-FR-AUTH-001-sso-login.md",
+    "requirements/nonfunctional/performance/REQQF-NFR-PERF-001-room-list-load-time.md",
+    "requirements/nonfunctional/security/REQQF-NFR-SEC-001-session-timeout.md",
+    "requirements/adrs/REQQF-ADR-BOOKING-001-concurrent-booking-lock.md",
+    "requirements/adrs/REQQF-ADR-AUTH-001-oidc-login.md",
+    "requirements/policies/REQQF-POL-BOOKING-001-long-booking-approval.md",
+    "requirements/policies/REQQF-POL-PRIVACY-001-booking-data-retention.md",
+    "requirements/testcases/REQQF-TC-BOOKING-001-reject-conflicting-booking.md"
   ],
   "exclude": [
     ".reqq/toolkit.lock",
     ".reqq/validator/config.yaml"
-  ]
+  ],
+  "public": {
+    "include": [
+      "docs/framework/**/*",
+      "docs/starter-kit.md",
+      ".reqq/README.md"
+    ],
+    "overlay": "public",
+    "copies": {
+      "LICENSE": "LICENSES/Apache-2.0.txt",
+      "NOTICE": "LICENSES/NOTICE-reqQuest-Framework.txt"
+    }
+  }
 }

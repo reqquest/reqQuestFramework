@@ -1,28 +1,95 @@
 # config.example.yaml — starting point for `.reqq/validator/config.yaml`.
 #
 # `config.yaml` is local configuration and is deliberately NOT part of the toolkit
-# boundary (ADR-TOOLKIT-001 D1), so `upgrade` never touches it. This example ships
+# boundary (`toolkit-manifest.json`), so `upgrade` never touches it. This example ships
 # instead, so a fresh adopter has something to copy:
 #
 #     cp .reqq/validator/config.example.yaml .reqq/validator/config.yaml
 #
-# Everything here is optional — the validator runs without config.yaml. Path exclusions
+# Everything here is optional — the validator runs without config.yaml, but the toolkit
+# examples then fail: they carry the prefix REQQF, see `id_prefix` below. Path exclusions
 # live in `.reqqignore` at the repo root (portable across validator implementations);
 # `exclude_globs` below is the validator-specific addition, and the two are summed.
+
+# The one language of requirements in this repo: an ISO 639-1 code, lowercase (en, pl, ...).
+# Covers `title` and other text fields of the front matter, and the whole document body.
+# Does not cover keys, `id`, enum values (`type`, `status`), code and contract identifiers
+# (field names, error codes, constants) or quotations — they stay as they are.
+# The validator checks only the code itself: an unknown value exits 3; the language of the
+# text is not checked. Remove the key to declare no language (no check at all).
+language: en
+
+# The repository prefix of every requirement ID: 2–6 uppercase letters, equal to the
+# repository key used in branch and issue names (branch REQA#12 -> REQA-FR-AGENT-001).
+# With it, every `id` carries exactly this prefix and every reference a prefix (another
+# prefix points to another repository); without it, no ID or reference has a prefix.
+# REQQF is the prefix of the toolkit examples (numbers 001-099, tag `example`), so a fresh
+# install validates. Set your repository key once you replace the examples: the
+# validator then reports every example left over. An invalid value exits 3.
+id_prefix: REQQF
+
+# Short title in requirement file names: 1–4 English words in lowercase letters and digits,
+# joined by hyphens, whatever `language` says. With true, every requirement needs the
+# front-matter field `short_title` and the file name `<id>-<short_title>.md`, e.g.
+# REQQF-FR-BOOKING-001-room-booking.md; a link to it shows that full name as its text.
+# Without the key, or with false, the file name equals `id` and the field is not checked.
+# The toolkit examples carry short titles, so a fresh install validates only with true.
+# A value other than true or false exits 3.
+short_title: true
+
+# Folder layout of requirement files. With true, a file under requirements/ must sit in the
+# folder its ID and type point to: business/, functional/<ID category>/,
+# nonfunctional/<quality attribute>/, adrs/, testcases/ or policies/. `category` of FR and POL
+# equals the ID category, `category` of NFR equals the folder, and each NFR folder has one
+# ID code. Without the key, or with false, the layout is a convention and is not checked.
+# The toolkit examples follow it. A value other than true or false exits 3.
+enforce_layout: true
 
 # FR/NFR without `traces_to` fail validation. Set to false to check only the
 # per-type required fields (category / decisions / derives_from).
 require_full_traceability: true
 
+# OpenAPI fragments embedded in requirements: fenced blocks marked
+# ```yaml openapi id=<requirement id>.<name>, whose root holds only `paths` and `components`.
+# The `openapi` check validates each one against the official OpenAPI schema of `version`
+# (3.0, 3.1 or 3.2) and reports at `level`: off, warning or error. Without the key: 3.2 and
+# warning. Any other value exits 3. Convention: conventions.md, section 9, at
+# https://github.com/reqquest/reqQuestFramework/blob/main/docs/framework/conventions.md
+#
+# openapi:
+#   version: "3.2"
+#   level: warning
+
 # Validator-specific exclusions, on top of .reqqignore.
 exclude_globs: []
 
-# Toolkit versioning (ADR-TOOLKIT-001 D5). Remove this block to disable the CI check
+# Folders whose `.md` files reqq_check_links.py scans for broken relative links.
+# Default when absent: requirements only. Add your own folders (e.g. docs) here.
+# An empty list (`link_check_paths: []`) disables the check.
+link_check_paths:
+  - requirements
+
+# Ownership governance: roles in requirements/00-context/roles.yaml own
+# areas of requirements/. Create roles.yaml by copying roles.example.yaml from the same
+# folder and putting your handles in it. The `owners` check of `reqq_validate.py` checks it
+# (pre-commit hook and CI) and `reqq_owners.py generate` writes the CODEOWNERS block. Without the key the state is
+# `undetected`: a warning, never a failure. Levels add up:
+#   off      - a recorded decision not to use it; needs decided and decided_by
+#   catalog  - roles.yaml is valid, every `owner` is a role key, stakeholders.md assigns every role
+#   generate - plus the block at the end of .github/CODEOWNERS (GitHub only)
+#   enforce  - plus rule V6 in CI (`reqq_validate.py --check owners-host`): the branch requires review from code
+#              owners and every handle has write access; GitHub only
+#
+# ownership:
+#   mode: catalog
+#   decided: "2026-11-17"
+#   decided_by: your-name
+
+# Toolkit versioning. Remove this block to disable the CI check
 # entirely — `check --ci` then exits 0 without doing anything.
-# The stdlib YAML parser does not strip inline comments — keep them on their own line.
 #
 # An available toolkit update NEVER fails `check --ci`, at any level below — only local
-# drift against toolkit.lock does (reqquest/reqQuestFramework#4). The shipped
+# drift against toolkit.lock does. The shipped
 # requirements-toolkit-check.yml workflow that runs this also only triggers on `schedule`
 # and `workflow_dispatch`, never on push/pull_request, so publishing a toolkit release can
 # never turn an unrelated commit's CI red.
@@ -30,13 +97,14 @@ toolkit:
   # stable | next
   update_channel: stable
   # off (no CI operation at all) | notify (opens/updates/closes a tracking issue) |
-  # pr (opens/updates an upgrade PR) — reqquest/reqQuestFramework#6. Acted on by the
+  # pr (opens/updates an upgrade PR). Acted on by the
   # scheduled requirements-toolkit-update.yml workflow; `check --ci`'s exit code never
   # depends on this. Deprecated aliases still work with a one-time warning:
   # manual -> off, ci-notify -> notify, ci-pr -> pr.
   update_check: notify
   # github | gitlab — which host this repo is on. Declared explicitly, not guessed, so a
-  # future GitLab adapter (mirroring ADR-GOV-001 D9) won't force a config migration. Only
-  # `github` is implemented today — requirements-toolkit-update.yml is a GitHub Actions
-  # workflow that opens GitHub issues/PRs via `gh`.
+  # future GitLab adapter won't force a config migration.
+  # reqq_owners.py reads it for the handle format (rule V4) and writes .github/CODEOWNERS
+  # for github only. requirements-toolkit-update.yml is a GitHub Actions workflow that opens
+  # GitHub issues/PRs via `gh`, so it runs on github only.
   host: github
